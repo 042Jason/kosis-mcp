@@ -18,4 +18,4 @@ ENV KOSIS_OUTPUT_DIR=/app/kosis_charts
 
 EXPOSE 8000
 
-CMD ["uvicorn", "server:starlette_app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "uvicorn server:starlette_app --host 0.0.0.0 --port ${PORT:-8000}"]
