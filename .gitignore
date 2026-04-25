@@ -1,0 +1,28 @@
+# 환경변수 (절대 올리지 마세요 — API 키 포함)
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# 생성된 차트 파일
+kosis_charts/
+*.png
+*.html
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
