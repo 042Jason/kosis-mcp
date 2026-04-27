@@ -1,8 +1,8 @@
 """
-KOSIS OpenAPI 클라이언트 (개선판)
-- 의도 기반 검색: 정책/연구 니즈 → KOSIS 카테고리 자동 매핑
-- 병렬 다중 키워드 검색
-- 응답 크기 최적화
+KOSIS OpenAPI client
+- Intent-based search: maps policy/research needs to KOSIS categories
+- Parallel multi-keyword search
+- Auto-retry on objL error by fetching actual item codes
 """
 
 import asyncio
@@ -12,12 +12,11 @@ from typing import Optional
 
 BASE_URL = "https://kosis.kr/openapi"
 
-# ──────────────────────────────────────────────────────────────────────────────
-# 의도(intent) → KOSIS 검색 키워드 매핑 테이블
-# 사용자가 "청년정책 보고서", "저소득 한부모" 같은 자연어로 요청할 때 사용
-# ──────────────────────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────────────────────
+# intent → KOSIS search keyword mapping
+# ─────────────────────────────────────────────────────────────────────────────
 INTENT_MAP: dict[str, dict] = {
-    # ── 대상별 ─────────────────────────────────────────────────────
+    # 대상별
     "청년": {
         "vw_cd": "MT_TM1_TITLE",
         "keywords": ["청년", "청년층", "청년고용", "청년취업"],
@@ -58,7 +57,7 @@ INTENT_MAP: dict[str, dict] = {
         "keywords": ["한부모", "모자가정", "부자가정"],
         "topic_keywords": ["한부모", "편부", "편모", "모자", "부자가정", "저소득"],
     },
-    # ── 이슈별 ─────────────────────────────────────────────────────
+    # 이슈별
     "저출산": {
         "vw_cd": "MT_TM2_TITLE",
         "keywords": ["저출산", "출산", "출생"],
@@ -84,7 +83,7 @@ INTENT_MAP: dict[str, dict] = {
         "keywords": ["저소득", "기초생활", "빈곤"],
         "topic_keywords": ["저소득", "기초생활", "수급자", "빈곤율", "차상위"],
     },
-    # ── 주제별 ─────────────────────────────────────────────────────
+    # 주제별
     "고용": {
         "vw_cd": "MT_ZTITLE",
         "keywords": ["고용", "취업", "실업"],
@@ -125,28 +124,31 @@ INTENT_MAP: dict[str, dict] = {
         "keywords": ["지역", "시도", "지역격차"],
         "topic_keywords": ["지역", "시도", "지방", "광역시", "균형발전"],
     },
+    "프랜차이즈": {
+        "vw_cd": "MT_ZTITLE",
+        "keywords": ["프랜차이즈", "가맹점", "가맹사업"],
+        "topic_keywords": ["프랜차이즈", "가맹", "편의점", "외식"],
+    },
+    "소상공인": {
+        "vw_cd": "MT_ZTITLE",
+        "keywords": ["소상공인", "자영업", "중소기업"],
+        "topic_keywords": ["소상공인", "자영업", "소기업", "창업"],
+    },
 }
 
 
 def detect_intent(query: str) -> list[dict]:
-    """
-    자연어 쿼리에서 관련 의도(intent)를 탐지합니다.
-    매칭된 의도별 검색 설정을 반환합니다.
-    """
     matched = []
     query_lower = query.lower()
     for intent_key, config in INTENT_MAP.items():
-        # 키워드 중 하나라도 포함되면 매칭
         all_kws = [intent_key] + config.get("keywords", []) + config.get("topic_keywords", [])
         if any(kw in query_lower for kw in all_kws):
             matched.append({
                 "intent": intent_key,
                 "vw_cd": config["vw_cd"],
-                "search_keywords": config["keywords"][:3],  # 상위 3개만
+                "search_keywords": config["keywords"][:3],
             })
-    # 매칭 없으면 일반 주제별 검색
     if not matched:
-        # 쿼리 단어를 직접 키워드로 사용
         words = [w for w in query.split() if len(w) >= 2][:3]
         matched.append({
             "intent": "일반",
@@ -157,7 +159,7 @@ def detect_intent(query: str) -> list[dict]:
 
 
 class KosisClient:
-    """KOSIS OpenAPI 비동기 HTTP 클라이언트."""
+    """KOSIS OpenAPI async HTTP client."""
 
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -166,7 +168,7 @@ class KosisClient:
     async def close(self):
         await self._client.aclose()
 
-    # ── 1. 카테고리 탐색 ─────────────────────────────────────────
+    # ── 1. Category browsing ─────────────────────────────────────────────────
     async def browse_categories(
         self,
         vw_cd: str = "MT_ZTITLE",
@@ -185,10 +187,34 @@ class KosisClient:
         resp.raise_for_status()
         data = resp.json()
         if isinstance(data, dict) and "err" in data:
-            raise ValueError(f"KOSIS API 오류: {data}")
+            raise ValueError(f"KOSIS API error: {data}")
         return data if isinstance(data, list) else []
 
-    # ── 2. 통계 데이터 조회 ──────────────────────────────────────
+    # ── 2. Fetch item/dimension codes for a table ────────────────────────────
+    async def _get_item_codes(self, org_id: str, tbl_id: str) -> list[dict]:
+        """
+        Returns the list of classification dimensions for a table.
+        Used to build objL1/objL2/... parameters when 'ALL' is rejected.
+        """
+        params = {
+            "method": "getList",
+            "apiKey": self.api_key,
+            "orgId": org_id,
+            "tblId": tbl_id,
+            "itmDiv": "all",
+            "format": "json",
+            "jsonVD": "Y",
+            "errMsg": "Y",
+        }
+        try:
+            resp = await self._client.get(f"{BASE_URL}/statisticsItemList.do", params=params)
+            resp.raise_for_status()
+            data = resp.json()
+            return data if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    # ── 3. Statistics data ───────────────────────────────────────────────────
     async def get_statistics_data(
         self,
         org_id: str,
@@ -224,11 +250,36 @@ class KosisClient:
         )
         resp.raise_for_status()
         data = resp.json()
+
+        # ── objL error: fetch actual dimension codes and retry ───────────────
+        if isinstance(data, dict) and data.get("err") == "20":
+            items = await self._get_item_codes(org_id, tbl_id)
+            if items:
+                # Collect unique OBJ_ID values from items
+                obj_ids = []
+                seen = set()
+                for it in items:
+                    oid = it.get("OBJ_ID") or it.get("ITMC_ID") or ""
+                    if oid and oid not in seen:
+                        seen.add(oid)
+                        obj_ids.append(oid)
+                # Rebuild params with actual objL values
+                params.pop("objL1", None)
+                params.pop("objL2", None)
+                params.pop("objL3", None)
+                for idx, oid in enumerate(obj_ids[:5], start=1):
+                    params[f"objL{idx}"] = oid
+                resp2 = await self._client.get(
+                    f"{BASE_URL}/Param/statisticsParameterData.do", params=params
+                )
+                resp2.raise_for_status()
+                data = resp2.json()
+
         if isinstance(data, dict) and "err" in data:
-            raise ValueError(f"KOSIS API 오류: {data}")
+            raise ValueError(f"KOSIS API error: {data}  request_id: {data.get('request_id', '')}")
         return data if isinstance(data, list) else []
 
-    # ── 3. 통계 설명 조회 ────────────────────────────────────────
+    # ── 4. Statistics explanation ────────────────────────────────────────────
     async def get_statistics_explanation(
         self,
         org_id: str,
@@ -252,14 +303,12 @@ class KosisClient:
         data = resp.json()
         return data if isinstance(data, list) else [data]
 
-    # ── 4. 키워드 검색 ───────────────────────────────────────────
+    # ── 5. Keyword search ────────────────────────────────────────────────────
     async def search_statistics(
         self,
         keyword: str,
         vw_cd: str = "MT_ZTITLE",
     ) -> list[dict]:
-        """키워드로 통계표를 검색합니다. statisticsSearch.do → 실패 시 목록 탐색."""
-        # 1) 통합검색 API 시도
         try:
             params = {
                 "method": "getList",
@@ -280,7 +329,6 @@ class KosisClient:
         except Exception:
             pass
 
-        # 2) 대체: 상위 카테고리 순회 필터링 (병렬)
         top_level = await self.browse_categories(vw_cd=vw_cd, parent_list_id="A")
         tasks = []
         for cat in top_level[:15]:
@@ -304,25 +352,14 @@ class KosisClient:
         except Exception:
             return []
 
-    # ── 5. 의도 기반 통합 검색 ─────────────────────────────────
+    # ── 6. Intent-based unified search ──────────────────────────────────────
     async def search_by_intent(
         self,
         query: str,
         max_results: int = 15,
     ) -> dict:
-        """
-        사용자의 자연어 연구 의도에서 관련 KOSIS 통계표를 탐색합니다.
-
-        Args:
-            query: 사용자 의도 설명 (예: "청년 고용정책 보고서", "저소득 한부모 가정 지원")
-            max_results: 최대 반환 개수
-
-        Returns:
-            {"intent": [...], "tables": [{org_id, tbl_id, name, category}]}
-        """
         intents = detect_intent(query)
 
-        # 의도별 병렬 검색
         async def search_one(intent_cfg: dict) -> list[dict]:
             found = []
             for kw in intent_cfg["search_keywords"]:
