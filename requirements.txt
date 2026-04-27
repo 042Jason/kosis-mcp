@@ -1,7 +1,7 @@
 # KOSIS MCP 의존성 — Python 3.11+
 
-# MCP SDK
-mcp>=1.0.0
+# MCP SDK (1.2.0+ required for StreamableHTTPSessionManager)
+mcp>=1.2.0
 
 # 웹 서버 (SSE transport)
 uvicorn[standard]>=0.30.0
