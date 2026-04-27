@@ -405,59 +405,179 @@ async def handle_index(request: Request):
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>KOSIS MCP 서버</title>
 <style>
-  body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-         max-width: 820px; margin: 60px auto; padding: 0 24px; color: #1a1a1a; }}
-  h1 {{ font-size: 1.8rem; }}
-  .badge {{ background: #22c55e; color: white; font-size: 0.75rem;
-            padding: 2px 10px; border-radius: 99px; margin-left: 8px; }}
-  .box {{ background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 12px;
-          padding: 24px; margin: 20px 0; }}
-  .box h2 {{ margin-top: 0; font-size: 0.9rem; color: #475569; text-transform: uppercase; letter-spacing:.05em; }}
-  code {{ background: #1e293b; color: #7dd3fc; padding: 12px 16px;
-          border-radius: 8px; display: block; font-size: 0.85rem; white-space: pre-wrap; }}
-  input {{ width:100%; box-sizing:border-box; padding:10px 14px;
-           border:1px solid #cbd5e1; border-radius:8px; font-size:.95rem; }}
-  button {{ margin-top:10px; padding:10px 22px; background:#3b82f6;
-            color:white; border:none; border-radius:8px; cursor:pointer; }}
-  button:hover {{ background:#2563eb; }}
-  #out {{ margin-top:14px; }}
-  li {{ margin-bottom: 6px; line-height: 1.7; }}
+  *{{box-sizing:border-box;margin:0;padding:0;}}
+  body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+       background:#f1f5f9;color:#1a1a1a;}}
+  .hero{{background:linear-gradient(135deg,#1e3a5f 0%,#2563eb 100%);
+         color:white;padding:56px 24px 48px;text-align:center;}}
+  .hero h1{{font-size:2rem;font-weight:700;margin-bottom:10px;}}
+  .hero p{{font-size:1.05rem;opacity:.85;max-width:600px;margin:0 auto;}}
+  .badge{{background:#22c55e;color:white;font-size:.72rem;padding:3px 11px;
+          border-radius:99px;vertical-align:middle;margin-left:8px;}}
+  .wrap{{max-width:860px;margin:0 auto;padding:32px 20px 60px;}}
+  .card{{background:white;border:1px solid #e2e8f0;border-radius:14px;
+         padding:28px;margin-bottom:24px;}}
+  .card h2{{font-size:1rem;font-weight:700;margin-bottom:16px;
+            display:flex;align-items:center;gap:8px;}}
+  .step-num{{background:#2563eb;color:white;width:24px;height:24px;
+             border-radius:50%;display:inline-flex;align-items:center;
+             justify-content:center;font-size:.8rem;font-weight:700;flex-shrink:0;}}
+  code{{background:#0f172a;color:#7dd3fc;padding:13px 16px;border-radius:9px;
+        display:block;font-size:.84rem;white-space:pre-wrap;word-break:break-all;line-height:1.6;}}
+  .inline-code{{background:#f1f5f9;color:#0f172a;padding:2px 7px;border-radius:4px;
+                font-size:.88em;font-family:monospace;}}
+  input{{width:100%;padding:11px 14px;border:1px solid #cbd5e1;border-radius:9px;
+         font-size:.95rem;margin-bottom:2px;}}
+  input:focus{{outline:none;border-color:#2563eb;box-shadow:0 0 0 3px rgba(37,99,235,.15);}}
+  .btn{{margin-top:10px;padding:11px 26px;background:#2563eb;color:white;
+        border:none;border-radius:9px;cursor:pointer;font-size:.95rem;font-weight:600;}}
+  .btn:hover{{background:#1d4ed8;}}
+  #url-out{{margin-top:14px;}}
+  .tool-grid{{display:grid;grid-template-columns:1fr 1fr;gap:14px;}}
+  @media(max-width:600px){{.tool-grid{{grid-template-columns:1fr;}}}}
+  .tool-card{{background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;padding:16px;}}
+  .tool-card .name{{font-family:monospace;font-size:.82rem;color:#2563eb;
+                    font-weight:700;margin-bottom:6px;}}
+  .tool-card p{{font-size:.88rem;color:#475569;line-height:1.5;}}
+  .example-list{{list-style:none;}}
+  .example-list li{{padding:11px 14px;background:#f8fafc;border:1px solid #e2e8f0;
+                    border-radius:9px;margin-bottom:9px;font-size:.9rem;line-height:1.5;
+                    cursor:pointer;transition:background .15s;}}
+  .example-list li:hover{{background:#eff6ff;border-color:#bfdbfe;}}
+  .example-list li::before{{content:"💬 ";}}
+  .intent-wrap{{display:flex;flex-wrap:wrap;gap:8px;margin-top:4px;}}
+  .intent-tag{{background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;
+               padding:4px 12px;border-radius:99px;font-size:.82rem;}}
+  .divider{{border:none;border-top:1px solid #e2e8f0;margin:8px 0 16px;}}
+  a{{color:#2563eb;text-decoration:none;}}
+  a:hover{{text-decoration:underline;}}
+  .footer{{text-align:center;padding:24px;font-size:.83rem;color:#94a3b8;}}
 </style>
 </head>
 <body>
-<h1>📊 KOSIS MCP 서버 <span class="badge">Running</span></h1>
-<p>KOSIS 국가통계포털 데이터를 AI가 검색·분석·시각화하는 MCP 서버입니다.</p>
 
-<div class="box">
-  <h2>🔑 Step 1 — KOSIS 인증키 입력</h2>
-  <input id="key" type="text" placeholder="KOSIS OpenAPI 인증키 (kosis.kr/openapi 에서 발급)" />
-  <button onclick="gen()">접속 URL 생성</button>
-  <div id="out"></div>
+<div class="hero">
+  <h1>📊 KOSIS MCP 서버 <span class="badge">● Running</span></h1>
+  <p>KOSIS 국가통계포털 데이터를 Claude AI가 자동으로 검색·분석·시각화해주는 MCP 서버</p>
 </div>
 
-<div class="box">
-  <h2>⚙️ Step 2 — Claude 연결</h2>
-  <p>생성된 URL을 Claude Desktop의 커스텀 MCP 커넥터로 등록하거나 <code id="cfg">URL 생성 후 여기에 설정이 표시됩니다.</code></p>
-</div>
+<div class="wrap">
 
-<div class="box">
-  <h2>💬 사용 예시 (의도 기반 검색)</h2>
-  <ul>
-    <li>"청년정책 보고서 작성 중인데 관련 통계 찾아줘"</li>
-    <li>"저소득 한부모 가정을 위한 정책 마련 중이야, 관련 KOSIS 통계 분석해줘"</li>
-    <li>"인구 소멸에 관한 논문 쓰고 있어. 출산율·고령화 차트 만들어줘"</li>
-    <li>"지역별 고령화율 비교 차트 보여줘"</li>
-  </ul>
+  <!-- STEP 1 -->
+  <div class="card">
+    <h2><span class="step-num">1</span> KOSIS 인증키 발급</h2>
+    <p style="margin-bottom:14px;font-size:.92rem;color:#475569;">
+      <a href="https://kosis.kr/openapi/" target="_blank">kosis.kr/openapi</a>에서 회원가입 후
+      <strong>활용신청 → 인증키 발급</strong>을 받으세요. 즉시 발급됩니다.
+    </p>
+    <input id="api-key" type="text" placeholder="발급받은 KOSIS 인증키를 입력하세요" />
+    <button class="btn" onclick="generateUrl()">접속 URL 생성 →</button>
+    <div id="url-out"></div>
+  </div>
+
+  <!-- STEP 2 -->
+  <div class="card">
+    <h2><span class="step-num">2</span> Claude에 연결</h2>
+    <p style="font-size:.92rem;color:#475569;margin-bottom:14px;">
+      Claude 앱 → <strong>Settings → Integrations → Add custom integration</strong>에
+      생성된 URL을 붙여넣으세요. 별도 설치·설정 없이 바로 사용 가능합니다.
+    </p>
+    <code id="config-box">{base_url}/sse?kosis_key=YOUR_KEY</code>
+    <p style="margin-top:10px;font-size:.83rem;color:#94a3b8;">
+      ※ claude_desktop_config.json을 직접 수정할 경우:
+      <span class="inline-code">{{"mcpServers":{{"kosis":{{"url":"[위 URL]"}}}}}}</span>
+    </p>
+  </div>
+
+  <!-- STEP 3 사용 예시 -->
+  <div class="card">
+    <h2><span class="step-num">3</span> 이렇게 말해보세요</h2>
+    <p style="font-size:.88rem;color:#64748b;margin-bottom:14px;">
+      클릭하면 예시 문구가 복사됩니다.
+    </p>
+    <ul class="example-list" id="examples">
+      <li data-text="청년정책 보고서 작성 중인데, 청년 고용·주거·교육 관련 KOSIS 통계 찾아서 분석해줘">청년정책 보고서 작성 중인데, 청년 고용·주거·교육 관련 KOSIS 통계 찾아서 분석해줘</li>
+      <li data-text="저소득 한부모 가정을 위한 정책 마련 중이야. 관련 통계 찾아서 차트로 보여줘">저소득 한부모 가정을 위한 정책 마련 중이야. 관련 통계 찾아서 차트로 보여줘</li>
+      <li data-text="인구 소멸에 관한 논문 쓰고 있어. 합계출산율과 고령화율 추이 그래프 만들어줘">인구 소멸에 관한 논문 쓰고 있어. 합계출산율과 고령화율 추이 그래프 만들어줘</li>
+      <li data-text="지역별 고령화율 현황을 비교 차트로 만들어줘">지역별 고령화율 현황을 비교 차트로 만들어줘</li>
+      <li data-text="최근 10년간 청년 실업률 추이를 꺾은선 그래프로 보여줘">최근 10년간 청년 실업률 추이를 꺾은선 그래프로 보여줘</li>
+      <li data-text="장애인 복지 관련 정책 연구 중이야. 장애인 현황 통계 분석해줘">장애인 복지 관련 정책 연구 중이야. 장애인 현황 통계 분석해줘</li>
+    </ul>
+  </div>
+
+  <!-- 지원 의도 -->
+  <div class="card">
+    <h2>🗂 지원하는 연구·정책 분야</h2>
+    <hr class="divider">
+    <p style="font-size:.85rem;color:#64748b;margin-bottom:12px;">아래 키워드를 포함해 질문하면 관련 통계표를 자동으로 탐색합니다.</p>
+    <div class="intent-wrap">
+      <span class="intent-tag">청년</span><span class="intent-tag">아동·보육</span>
+      <span class="intent-tag">청소년</span><span class="intent-tag">노인·고령자</span>
+      <span class="intent-tag">여성</span><span class="intent-tag">장애인</span>
+      <span class="intent-tag">다문화</span><span class="intent-tag">한부모</span>
+      <span class="intent-tag">저출산</span><span class="intent-tag">고령화</span>
+      <span class="intent-tag">인구소멸</span><span class="intent-tag">1인가구</span>
+      <span class="intent-tag">저소득·빈곤</span><span class="intent-tag">고용·실업</span>
+      <span class="intent-tag">교육</span><span class="intent-tag">주거·주택</span>
+      <span class="intent-tag">소득·임금</span><span class="intent-tag">복지</span>
+      <span class="intent-tag">보건·의료</span><span class="intent-tag">인구</span>
+      <span class="intent-tag">지역균형</span>
+    </div>
+  </div>
+
+  <!-- 제공 기능 -->
+  <div class="card">
+    <h2>⚙️ 제공 기능 (MCP 도구)</h2>
+    <hr class="divider">
+    <div class="tool-grid">
+      <div class="tool-card">
+        <div class="name">kosis_find_by_intent</div>
+        <p>자연어로 연구 의도를 설명하면 관련 KOSIS 통계표를 자동 탐색합니다.</p>
+      </div>
+      <div class="tool-card">
+        <div class="name">kosis_analyze</div>
+        <p>통계표 데이터 조회 + 차트 생성을 한 번에 처리합니다. 꺾은선·막대·파이 등 7종 지원.</p>
+      </div>
+      <div class="tool-card">
+        <div class="name">kosis_dashboard</div>
+        <p>여러 통계표를 하나의 대시보드로 묶어 시각화합니다.</p>
+      </div>
+      <div class="tool-card">
+        <div class="name">kosis_browse</div>
+        <p>KOSIS 카테고리 트리를 직접 탐색해 원하는 통계표를 찾습니다.</p>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /wrap -->
+
+<div class="footer">
+  KOSIS MCP Server · Built with <a href="https://modelcontextprotocol.io" target="_blank">MCP</a> ·
+  데이터 출처: <a href="https://kosis.kr" target="_blank">통계청 KOSIS</a>
 </div>
 
 <script>
-function gen() {{
-  const k = document.getElementById('key').value.trim();
-  if (!k) {{ alert('인증키를 입력하세요'); return; }}
-  const url = `{base_url}/sse?kosis_key=${{k}}`;
-  document.getElementById('out').innerHTML = '<p style="margin:10px 0 4px;font-weight:600">접속 URL:</p><code>' + url + '</code>';
-  document.getElementById('cfg').textContent = JSON.stringify({{"mcpServers":{{"kosis":{{"url": url}}}}}}, null, 2);
+function generateUrl() {{
+  const key = document.getElementById('api-key').value.trim();
+  if (!key) {{ alert('인증키를 입력해주세요'); return; }}
+  const url = `{base_url}/sse?kosis_key=${{key}}`;
+  document.getElementById('url-out').innerHTML =
+    '<p style="margin:12px 0 6px;font-weight:600;font-size:.9rem;">접속 URL (Claude Integrations에 붙여넣기):</p>' +
+    '<code style="background:#0f172a;color:#7dd3fc;padding:13px 16px;border-radius:9px;display:block;font-size:.84rem;word-break:break-all;">' + url + '</code>';
+  document.getElementById('config-box').textContent = url;
 }}
+
+// 예시 클릭 시 복사
+document.getElementById('examples').addEventListener('click', function(e) {{
+  const li = e.target.closest('li');
+  if (!li) return;
+  const text = li.dataset.text;
+  navigator.clipboard.writeText(text).then(() => {{
+    const orig = li.style.background;
+    li.style.background = '#dcfce7';
+    setTimeout(() => li.style.background = orig, 600);
+  }});
+}});
 </script>
 </body>
 </html>"""
