@@ -5,8 +5,7 @@ WORKDIR /app
 # 시스템 의존성 (kaleido PNG 렌더링용)
 RUN apt-get update && apt-get install -y \
     fonts-nanum \
-    && rm -rf /var/lib/apt/lists/* \
-    && fc-cache -fv
+    && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
