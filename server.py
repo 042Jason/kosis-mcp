@@ -606,12 +606,19 @@ document.getElementById('examples').addEventListener('click', function(e) {{
     return HTMLResponse(html)
 
 
+class _SseMsgApp:
+    """handle_post_message를 라우트 정의 시점이 아닌 요청 시점에 바인딩.
+    MCP SDK 버전에 따라 handle_post_message가 초기화 전에 None일 수 있어서 래핑."""
+    async def __call__(self, scope, receive, send):
+        await sse_transport.handle_post_message(scope, receive, send)
+
+
 starlette_app = Starlette(
     routes=[
         Route("/", endpoint=handle_index),
         Route("/health", endpoint=handle_health),
         Route("/sse", endpoint=handle_sse),
-        Mount("/messages/", app=sse_transport.handle_post_message),
+        Mount("/messages/", app=_SseMsgApp()),
     ]
 )
 
