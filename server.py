@@ -1,11 +1,10 @@
 """
-KOSIS MCP 서버 (개선판) — SSE / HTTP transport
+KOSIS MCP 서버 (경량화판) — SSE / HTTP transport
 
-개선 사항:
-  1. kosis_find_by_intent: 자연어 연구 의도 → 관련 통계표 자동 탐색
-  2. kosis_analyze: 데이터 조회 + 차트 생성을 한 번에 (토큰 절약)
-  3. kosis_get_data: 요약만 반환 (전체 data_json 제거로 토큰 낭비 방지)
-  4. 시각화: kaleido 실패 시 HTML base64 자동 fallback
+변경 사항:
+  - 차트 생성 제거: 데이터 + chart_hint 반환 → Claude 자체 시각화 도구 활용
+  - errMsg=Y 파라미터 추가 (KOSIS API 필수값)
+  - plotly/kaleido 의존성 완전 제거
 
 접속 URL:
     https://your-server.com/sse?kosis_key=발급받은_인증키
@@ -17,6 +16,7 @@ import json
 import os
 from pathlib import Path
 
+import pandas as pd
 import uvicorn
 from mcp.server import Server
 from mcp.server.sse import SseServerTransport
@@ -28,11 +28,9 @@ from starlette.responses import HTMLResponse, JSONResponse
 from starlette.routing import Mount, Route
 
 from kosis_client import KosisClient, INTENT_MAP
-from visualizer import create_chart, create_dashboard, CHART_TYPES
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
 DEFAULT_API_KEY = os.environ.get("KOSIS_API_KEY", "")
-OUTPUT_DIR = os.environ.get("KOSIS_OUTPUT_DIR", str(Path.home() / "kosis_charts"))
 
 _api_key_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
     "kosis_api_key", default=DEFAULT_API_KEY
@@ -46,6 +44,70 @@ def _get_client() -> KosisClient:
     return KosisClient(key)
 
 
+# ── 데이터 전처리 헬퍼 ────────────────────────────────────────────────────────
+_KEEP_FIELDS = {"PRD_DE", "DT", "ITM_NM", "C1_NM", "C2_NM", "C3_NM", "UNIT_NM"}
+
+
+def _process_data(data: list[dict], color_field: str | None = None) -> tuple[list[dict], dict, str]:
+    """
+    데이터 정제 + 요약 통계 계산.
+    Returns: (filtered_rows, summary, unit)
+    """
+    if not data:
+        return [], {}, ""
+
+    unit = data[0].get("UNIT_NM", "") or ""
+
+    # 필요 컬럼만 추출
+    rows = [{k: v for k, v in row.items() if k in _KEEP_FIELDS} for row in data]
+
+    df = pd.DataFrame(rows)
+    if "DT" in df.columns:
+        df["DT"] = pd.to_numeric(
+            df["DT"].astype(str).str.replace(",", "", regex=False).str.strip(),
+            errors="coerce",
+        )
+
+    # color_field 카테고리 과다 시 필터링 (>12 → 전국/합계 or 상위 10)
+    if color_field and color_field in df.columns and df[color_field].nunique() > 12:
+        mask = df[color_field].astype(str).str.contains(
+            "전국|합계|전체|계$", na=False, regex=True
+        )
+        if mask.any():
+            df = df[mask].copy()
+        elif "DT" in df.columns:
+            top_vals = (
+                df.groupby(color_field)["DT"].mean().dropna().nlargest(10).index
+            )
+            df = df[df[color_field].isin(top_vals)].copy()
+
+    # 요약 통계
+    summary: dict = {}
+    if "DT" in df.columns:
+        s = df["DT"].dropna()
+        if not s.empty:
+            trend = (
+                "상승" if len(s) >= 2 and float(s.iloc[-1]) > float(s.iloc[0])
+                else ("하락" if len(s) >= 2 else "N/A")
+            )
+            change_pct = None
+            if len(s) >= 2 and float(s.iloc[0]) != 0:
+                change_pct = round(
+                    (float(s.iloc[-1]) - float(s.iloc[0])) / abs(float(s.iloc[0])) * 100, 1
+                )
+            summary = {
+                "count": int(s.count()),
+                "min": round(float(s.min()), 3),
+                "max": round(float(s.max()), 3),
+                "mean": round(float(s.mean()), 3),
+                "latest": round(float(s.iloc[-1]), 3),
+                "trend": trend,
+                "change_pct": change_pct,
+            }
+
+    return df.to_dict(orient="records"), summary, unit
+
+
 # ── MCP 서버 ──────────────────────────────────────────────────────────────────
 mcp_app = Server("kosis-mcp")
 
@@ -54,7 +116,7 @@ mcp_app = Server("kosis-mcp")
 async def list_tools() -> list[types.Tool]:
     intent_list = ", ".join(list(INTENT_MAP.keys())[:10]) + " 등"
     return [
-        # ── 1. 의도 기반 통계 탐색 (NEW) ────────────────────────────────────
+        # ── 1. 의도 기반 통계 탐색 ───────────────────────────────────────────
         types.Tool(
             name="kosis_find_by_intent",
             description=(
@@ -64,8 +126,7 @@ async def list_tools() -> list[types.Tool]:
                 "예시:\n"
                 "  '청년정책 보고서 작성 중' → 청년 고용·주거·교육 통계표\n"
                 "  '저소득 한부모 가정 지원 정책 마련' → 한부모·저소득·복지 통계표\n"
-                "  '인구 소멸 논문' → 출산율·고령화·인구이동 통계표\n"
-                "  '지역별 고령화 현황 분석' → 고령화·지역·노인 통계표"
+                "  '인구 소멸 논문' → 출산율·고령화·인구이동 통계표"
             ),
             inputSchema={
                 "type": "object",
@@ -84,13 +145,13 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
 
-        # ── 2. 데이터 조회 + 차트 통합 (NEW) ────────────────────────────────
+        # ── 2. 데이터 조회 (차트 힌트 포함) ─────────────────────────────────
         types.Tool(
             name="kosis_analyze",
             description=(
-                "KOSIS 통계표 데이터를 조회하고 차트를 한 번에 생성합니다.\n"
-                "데이터 조회 후 별도로 차트 툴을 호출할 필요 없이 이 툴 하나로 완료됩니다.\n\n"
-                "chart_type:\n"
+                "KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.\n"
+                "반환된 data 배열과 chart_hint를 활용해 Claude가 직접 시각화를 생성합니다.\n\n"
+                "chart_type 값:\n"
                 "  line       – 시계열 추이 (연도별 변화)\n"
                 "  multi_line – 복수 분류 비교 (지역별·성별 등)\n"
                 "  bar        – 세로 막대\n"
@@ -107,8 +168,9 @@ async def list_tools() -> list[types.Tool]:
                     "title": {"type": "string", "description": "차트 제목"},
                     "chart_type": {
                         "type": "string",
-                        "enum": list(CHART_TYPES),
-                        "default": "line"
+                        "enum": ["line", "bar", "bar_h", "pie", "scatter", "area", "multi_line"],
+                        "default": "line",
+                        "description": "권장 차트 유형"
                     },
                     "start_year": {"type": "string", "description": "시작 연도 (예: '2010')"},
                     "end_year": {"type": "string", "description": "종료 연도 (예: '2024')"},
@@ -161,19 +223,19 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
 
-        # ── 5. 다중 차트 대시보드 ────────────────────────────────────────────
+        # ── 5. 다중 통계 대시보드 ────────────────────────────────────────────
         types.Tool(
             name="kosis_dashboard",
             description=(
-                "여러 통계표를 한 화면의 대시보드로 시각화합니다.\n"
-                "각 dataset은 kosis_analyze 대신 직접 데이터를 제공할 때 사용합니다."
+                "여러 통계표 데이터를 한꺼번에 조회해 반환합니다.\n"
+                "반환된 datasets 배열을 활용해 Claude가 대시보드 형태로 시각화를 생성합니다."
             ),
             inputSchema={
                 "type": "object",
                 "properties": {
                     "datasets": {
                         "type": "array",
-                        "description": "각 차트 설정 목록",
+                        "description": "조회할 통계표 목록",
                         "items": {
                             "type": "object",
                             "properties": {
@@ -197,7 +259,7 @@ async def list_tools() -> list[types.Tool]:
 
 
 @mcp_app.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[types.TextContent | types.ImageContent]:
+async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     client = _get_client()
 
     # ── kosis_find_by_intent ─────────────────────────────────────────────────
@@ -208,7 +270,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         )
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
-    # ── kosis_analyze (핵심: 조회 + 차트 한번에) ────────────────────────────
+    # ── kosis_analyze ────────────────────────────────────────────────────────
     elif name == "kosis_analyze":
         org_id = arguments["org_id"]
         tbl_id = arguments["tbl_id"]
@@ -220,7 +282,6 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         end_year = arguments.get("end_year")
         recent_n = arguments.get("recent_n", 20)
 
-        # 데이터 조회
         data = await client.get_statistics_data(
             org_id=org_id,
             tbl_id=tbl_id,
@@ -233,61 +294,33 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         if not data:
             return [types.TextContent(type="text", text="데이터가 없습니다.")]
 
-        # color_field 자동 감지 (multi_line인데 color_field 미지정 시)
-        if chart_type == "multi_line" and not color_field:
-            sample_keys = list(data[0].keys()) if data else []
+        # color_field 자동 감지
+        if not color_field:
+            sample_keys = set(data[0].keys()) if data else set()
             for c in ("ITM_NM", "C1_NM", "C2_NM"):
                 if c in sample_keys:
                     color_field = c
                     break
 
-        # 차트 생성
-        chart = create_chart(
-            data=data,
-            chart_type=chart_type,
-            title=title,
-            color_field=color_field,
-            output_dir=OUTPUT_DIR,
-            file_stem=title.replace(" ", "_")[:40],
-        )
+        rows, summary, unit = _process_data(data, color_field)
 
-        # 요약 텍스트 (간결하게 — 전체 데이터 덤프 없음)
-        summary = chart.get("summary", {})
-        unit = ""
-        if data and "UNIT_NM" in data[0]:
-            unit = data[0]["UNIT_NM"] or ""
-
-        info = {
+        result = {
             "title": title,
             "org_id": org_id,
             "tbl_id": tbl_id,
-            "rows": len(data),
             "unit": unit,
+            "rows": len(rows),
             "summary": summary,
-            "chart_type": chart_type,
+            "chart_hint": {
+                "chart_type": chart_type,
+                "x_field": "PRD_DE",
+                "y_field": "DT",
+                "color_field": color_field,
+            },
+            "data": rows[:300],  # 최대 300행
         }
-        if chart.get("html_path"):
-            info["html_saved"] = chart["html_path"]
 
-        contents: list = [
-            types.TextContent(type="text", text=json.dumps(info, ensure_ascii=False, indent=2))
-        ]
-
-        # 이미지 첨부 (PNG 우선, 실패 시 HTML base64)
-        if chart.get("base64_png"):
-            contents.append(
-                types.ImageContent(type="image", data=chart["base64_png"], mimeType="image/png")
-            )
-        elif chart.get("html_b64"):
-            # HTML을 SVG처럼 반환 (Claude가 표시 가능)
-            contents.append(
-                types.TextContent(
-                    type="text",
-                    text=f"[차트 HTML 생성됨 — PNG 렌더링 불가. html_saved 경로 참고]"
-                )
-            )
-
-        return contents
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
     # ── kosis_browse ────────────────────────────────────────────────────────
     elif name == "kosis_browse":
@@ -296,7 +329,8 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
             parent_list_id=arguments.get("parent_list_id", "A"),
         )
         tables = [
-            {"org_id": r.get("ORG_ID"), "tbl_id": r.get("TBL_ID"), "name": r.get("TBL_NM"), "updated": r.get("SEND_DE")}
+            {"org_id": r.get("ORG_ID"), "tbl_id": r.get("TBL_ID"),
+             "name": r.get("TBL_NM"), "updated": r.get("SEND_DE")}
             for r in result if r.get("TBL_ID")
         ]
         cats = [
@@ -306,7 +340,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
         out = {
             "sub_categories": cats,
             "tables": tables[:30],
-            "tip": "sub_categories의 list_id를 parent_list_id에 넣어 더 탐색하거나, tables의 org_id+tbl_id로 kosis_analyze 호출"
+            "tip": "sub_categories의 list_id를 parent_list_id에 넣어 더 탐색하거나, tables의 org_id+tbl_id로 kosis_analyze 호출",
         }
         return [types.TextContent(type="text", text=json.dumps(out, ensure_ascii=False, indent=2))]
 
@@ -316,59 +350,64 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent | type
             org_id=arguments["org_id"],
             tbl_id=arguments["tbl_id"],
         )
-        # 핵심 필드만 추출
         key_fields = {"TBL_NM", "STAT_NM", "CYCLE", "SURVEY_PURPOSE", "SURVEY_RANGE", "CONTACT_ORG"}
-        compact = []
-        for row in data:
-            item = {k: v for k, v in row.items() if k in key_fields or not k.endswith("_CD")}
-            compact.append(item)
+        compact = [
+            {k: v for k, v in row.items() if k in key_fields or not k.endswith("_CD")}
+            for row in data
+        ]
         return [types.TextContent(type="text", text=json.dumps(compact[:5], ensure_ascii=False, indent=2))]
 
     # ── kosis_dashboard ─────────────────────────────────────────────────────
     elif name == "kosis_dashboard":
         datasets_cfg = arguments["datasets"]
 
-        # 각 데이터셋 병렬 조회
-        async def fetch_ds(ds_cfg: dict) -> dict:
-            data = await client.get_statistics_data(
-                org_id=ds_cfg["org_id"],
-                tbl_id=ds_cfg["tbl_id"],
-                prd_se=ds_cfg.get("prd_se", "Y"),
-                start_prd_de=ds_cfg.get("start_year"),
-                end_prd_de=ds_cfg.get("end_year"),
-                new_est_prd_cnt=20,
-            )
-            return {
-                "data": data,
-                "title": ds_cfg["title"],
-                "chart_type": ds_cfg.get("chart_type", "line"),
-                "color_field": ds_cfg.get("color_field"),
-            }
+        async def fetch_ds(ds_cfg: dict) -> dict | None:
+            try:
+                data = await client.get_statistics_data(
+                    org_id=ds_cfg["org_id"],
+                    tbl_id=ds_cfg["tbl_id"],
+                    prd_se=ds_cfg.get("prd_se", "Y"),
+                    start_prd_de=ds_cfg.get("start_year"),
+                    end_prd_de=ds_cfg.get("end_year"),
+                    new_est_prd_cnt=20,
+                )
+                if not data:
+                    return None
+                color_field = ds_cfg.get("color_field")
+                if not color_field:
+                    sample_keys = set(data[0].keys())
+                    for c in ("ITM_NM", "C1_NM", "C2_NM"):
+                        if c in sample_keys:
+                            color_field = c
+                            break
+                rows, summary, unit = _process_data(data, color_field)
+                return {
+                    "title": ds_cfg["title"],
+                    "org_id": ds_cfg["org_id"],
+                    "tbl_id": ds_cfg["tbl_id"],
+                    "unit": unit,
+                    "rows": len(rows),
+                    "summary": summary,
+                    "chart_hint": {
+                        "chart_type": ds_cfg.get("chart_type", "line"),
+                        "x_field": "PRD_DE",
+                        "y_field": "DT",
+                        "color_field": color_field,
+                    },
+                    "data": rows[:150],
+                }
+            except Exception as e:
+                return {"title": ds_cfg.get("title", ""), "error": str(e)}
 
-        fetched = await asyncio.gather(*[fetch_ds(ds) for ds in datasets_cfg], return_exceptions=True)
-        valid_datasets = [f for f in fetched if isinstance(f, dict) and f.get("data")]
+        fetched = await asyncio.gather(*[fetch_ds(ds) for ds in datasets_cfg])
+        datasets_out = [f for f in fetched if f is not None]
 
-        if not valid_datasets:
-            return [types.TextContent(type="text", text="조회된 데이터가 없습니다.")]
-
-        result = create_dashboard(
-            datasets=valid_datasets,
-            output_dir=OUTPUT_DIR,
-            file_stem=arguments.get("dashboard_title", "dashboard").replace(" ", "_")[:40],
-        )
-
-        contents: list = [
-            types.TextContent(type="text", text=json.dumps({
-                "dashboard_title": arguments.get("dashboard_title", ""),
-                "charts": len(valid_datasets),
-                "html_path": result.get("html_path"),
-            }, ensure_ascii=False, indent=2))
-        ]
-        if result.get("base64_png"):
-            contents.append(
-                types.ImageContent(type="image", data=result["base64_png"], mimeType="image/png")
-            )
-        return contents
+        result = {
+            "dashboard_title": arguments.get("dashboard_title", "KOSIS 통계 대시보드"),
+            "count": len(datasets_out),
+            "datasets": datasets_out,
+        }
+        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
     raise ValueError(f"알 수 없는 도구: {name}")
 
@@ -463,7 +502,6 @@ async def handle_index(request: Request):
 
 <div class="wrap">
 
-  <!-- STEP 1 -->
   <div class="card">
     <h2><span class="step-num">1</span> KOSIS 인증키 발급</h2>
     <p style="margin-bottom:14px;font-size:.92rem;color:#475569;">
@@ -475,41 +513,29 @@ async def handle_index(request: Request):
     <div id="url-out"></div>
   </div>
 
-  <!-- STEP 2 -->
   <div class="card">
     <h2><span class="step-num">2</span> Claude에 연결</h2>
     <p style="font-size:.92rem;color:#475569;margin-bottom:14px;">
       Claude 앱 → <strong>Settings → Integrations → Add custom integration</strong>에
-      생성된 URL을 붙여넣으세요. 별도 설치·설정 없이 바로 사용 가능합니다.
+      생성된 URL을 붙여넣으세요.
     </p>
     <code id="config-box">{base_url}/sse?kosis_key=YOUR_KEY</code>
-    <p style="margin-top:10px;font-size:.83rem;color:#94a3b8;">
-      ※ claude_desktop_config.json을 직접 수정할 경우:
-      <span class="inline-code">{{"mcpServers":{{"kosis":{{"url":"[위 URL]"}}}}}}</span>
-    </p>
   </div>
 
-  <!-- STEP 3 사용 예시 -->
   <div class="card">
     <h2><span class="step-num">3</span> 이렇게 말해보세요</h2>
-    <p style="font-size:.88rem;color:#64748b;margin-bottom:14px;">
-      클릭하면 예시 문구가 복사됩니다.
-    </p>
     <ul class="example-list" id="examples">
       <li data-text="청년정책 보고서 작성 중인데, 청년 고용·주거·교육 관련 KOSIS 통계 찾아서 분석해줘">청년정책 보고서 작성 중인데, 청년 고용·주거·교육 관련 KOSIS 통계 찾아서 분석해줘</li>
       <li data-text="저소득 한부모 가정을 위한 정책 마련 중이야. 관련 통계 찾아서 차트로 보여줘">저소득 한부모 가정을 위한 정책 마련 중이야. 관련 통계 찾아서 차트로 보여줘</li>
       <li data-text="인구 소멸에 관한 논문 쓰고 있어. 합계출산율과 고령화율 추이 그래프 만들어줘">인구 소멸에 관한 논문 쓰고 있어. 합계출산율과 고령화율 추이 그래프 만들어줘</li>
-      <li data-text="지역별 고령화율 현황을 비교 차트로 만들어줘">지역별 고령화율 현황을 비교 차트로 만들어줘</li>
       <li data-text="최근 10년간 청년 실업률 추이를 꺾은선 그래프로 보여줘">최근 10년간 청년 실업률 추이를 꺾은선 그래프로 보여줘</li>
-      <li data-text="장애인 복지 관련 정책 연구 중이야. 장애인 현황 통계 분석해줘">장애인 복지 관련 정책 연구 중이야. 장애인 현황 통계 분석해줘</li>
+      <li data-text="지역별 고령화율 현황을 비교 차트로 만들어줘">지역별 고령화율 현황을 비교 차트로 만들어줘</li>
     </ul>
   </div>
 
-  <!-- 지원 의도 -->
   <div class="card">
     <h2>🗂 지원하는 연구·정책 분야</h2>
     <hr class="divider">
-    <p style="font-size:.85rem;color:#64748b;margin-bottom:12px;">아래 키워드를 포함해 질문하면 관련 통계표를 자동으로 탐색합니다.</p>
     <div class="intent-wrap">
       <span class="intent-tag">청년</span><span class="intent-tag">아동·보육</span>
       <span class="intent-tag">청소년</span><span class="intent-tag">노인·고령자</span>
@@ -525,7 +551,6 @@ async def handle_index(request: Request):
     </div>
   </div>
 
-  <!-- 제공 기능 -->
   <div class="card">
     <h2>⚙️ 제공 기능 (MCP 도구)</h2>
     <hr class="divider">
@@ -536,11 +561,11 @@ async def handle_index(request: Request):
       </div>
       <div class="tool-card">
         <div class="name">kosis_analyze</div>
-        <p>통계표 데이터 조회 + 차트 생성을 한 번에 처리합니다. 꺾은선·막대·파이 등 7종 지원.</p>
+        <p>통계표 데이터를 조회해 반환합니다. Claude가 데이터를 받아 차트를 직접 생성합니다.</p>
       </div>
       <div class="tool-card">
         <div class="name">kosis_dashboard</div>
-        <p>여러 통계표를 하나의 대시보드로 묶어 시각화합니다.</p>
+        <p>여러 통계표 데이터를 한꺼번에 조회합니다. Claude가 대시보드로 시각화합니다.</p>
       </div>
       <div class="tool-card">
         <div class="name">kosis_browse</div>
@@ -549,7 +574,7 @@ async def handle_index(request: Request):
     </div>
   </div>
 
-</div><!-- /wrap -->
+</div>
 
 <div class="footer">
   KOSIS MCP Server · Built with <a href="https://modelcontextprotocol.io" target="_blank">MCP</a> ·
@@ -562,17 +587,14 @@ function generateUrl() {{
   if (!key) {{ alert('인증키를 입력해주세요'); return; }}
   const url = `{base_url}/sse?kosis_key=${{key}}`;
   document.getElementById('url-out').innerHTML =
-    '<p style="margin:12px 0 6px;font-weight:600;font-size:.9rem;">접속 URL (Claude Integrations에 붙여넣기):</p>' +
+    '<p style="margin:12px 0 6px;font-weight:600;font-size:.9rem;">접속 URL:</p>' +
     '<code style="background:#0f172a;color:#7dd3fc;padding:13px 16px;border-radius:9px;display:block;font-size:.84rem;word-break:break-all;">' + url + '</code>';
   document.getElementById('config-box').textContent = url;
 }}
-
-// 예시 클릭 시 복사
 document.getElementById('examples').addEventListener('click', function(e) {{
   const li = e.target.closest('li');
   if (!li) return;
-  const text = li.dataset.text;
-  navigator.clipboard.writeText(text).then(() => {{
+  navigator.clipboard.writeText(li.dataset.text).then(() => {{
     const orig = li.style.background;
     li.style.background = '#dcfce7';
     setTimeout(() => li.style.background = orig, 600);

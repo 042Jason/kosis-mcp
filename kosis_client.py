@@ -179,6 +179,7 @@ class KosisClient:
             "parentListId": parent_list_id,
             "format": "json",
             "jsonVD": "Y",
+            "errMsg": "Y",
         }
         resp = await self._client.get(f"{BASE_URL}/statisticsList.do", params=params)
         resp.raise_for_status()
@@ -209,6 +210,7 @@ class KosisClient:
             "prdSe": prd_se,
             "format": "json",
             "jsonVD": "Y",
+            "errMsg": "Y",
         }
         if start_prd_de:
             params["startPrdDe"] = start_prd_de
@@ -241,6 +243,7 @@ class KosisClient:
             "metaItm": meta_itm,
             "format": "json",
             "jsonVD": "Y",
+            "errMsg": "Y",
         }
         resp = await self._client.get(
             f"{BASE_URL}/statisticsExplData.do", params=params
@@ -265,6 +268,7 @@ class KosisClient:
                 "searchNm": keyword,
                 "format": "json",
                 "jsonVD": "Y",
+                "errMsg": "Y",
             }
             resp = await self._client.get(
                 f"{BASE_URL}/statisticsSearch.do", params=params

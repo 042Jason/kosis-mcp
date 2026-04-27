@@ -13,14 +13,8 @@ starlette[full]>=0.37.0
 # 비동기 HTTP 클라이언트
 httpx>=0.27.0
 
-# 데이터 처리
+# 데이터 처리 (카테고리 필터링, 요약 통계)
 pandas>=2.1.0
-
-# 시각화
-plotly>=5.18.0
-
-# PNG 내보내기
-kaleido>=0.2.1
 
 # 환경변수 (.env 파일 지원)
 python-dotenv>=1.0.0
