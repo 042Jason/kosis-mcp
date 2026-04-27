@@ -1,7 +1,7 @@
 """
-KOSIS MCP 서버 -- SSE + Streamable HTTP transport (mcp 1.x / Starlette 1.x 호환)
+KOSIS MCP server -- SSE + Streamable HTTP transport (mcp 1.x / Starlette 1.x)
 
-접속 URL: https://your-server.com/sse?kosis_key=발급받은_인증키
+Connection URL: https://your-server.com/sse?kosis_key=YOUR_KEY
 """
 
 import asyncio
@@ -25,7 +25,7 @@ from starlette.types import Receive, Scope, Send
 
 from kosis_client import KosisClient, INTENT_MAP
 
-# -- 설정 -----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 DEFAULT_API_KEY = os.environ.get("KOSIS_API_KEY", "")
 
 _api_key_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -36,11 +36,11 @@ _api_key_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
 def _get_client() -> KosisClient:
     key = _api_key_ctx.get()
     if not key:
-        raise ValueError("KOSIS API key missing. Add ?kosis_key=YOUR_KEY to URL.")
+        raise ValueError("KOSIS API key missing. Add ?kosis_key=YOUR_KEY to the URL.")
     return KosisClient(key)
 
 
-# -- 데이터 전처리 ---------------------------------------------------------------
+# ---------------------------------------------------------------------------
 _KEEP_FIELDS = {"PRD_DE", "DT", "ITM_NM", "C1_NM", "C2_NM", "C3_NM", "UNIT_NM"}
 
 
@@ -57,7 +57,7 @@ def _process_data(data: list, color_field=None):
         )
     if color_field and color_field in df.columns and df[color_field].nunique() > 12:
         mask = df[color_field].astype(str).str.contains(
-            "전국|합계|전체|계$", na=False, regex=True
+            "|".join(["전국", "합계", "전체", "계$"]), na=False, regex=True
         )
         if mask.any():
             df = df[mask].copy()
@@ -69,8 +69,8 @@ def _process_data(data: list, color_field=None):
         s = df["DT"].dropna()
         if not s.empty:
             trend = (
-                "상승" if len(s) >= 2 and float(s.iloc[-1]) > float(s.iloc[0])
-                else ("하락" if len(s) >= 2 else "N/A")
+                "up" if len(s) >= 2 and float(s.iloc[-1]) > float(s.iloc[0])
+                else ("down" if len(s) >= 2 else "N/A")
             )
             change_pct = None
             if len(s) >= 2 and float(s.iloc[0]) != 0:
@@ -89,19 +89,19 @@ def _process_data(data: list, color_field=None):
     return df.to_dict(orient="records"), summary, unit
 
 
-# -- MCP 서버 -------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 mcp_server = Server("kosis-mcp")
 
 
 @mcp_server.list_tools()
 async def list_tools() -> list[types.Tool]:
-    intent_list = ", ".join(list(INTENT_MAP.keys())[:10]) + " 등"
+    intent_list = ", ".join(list(INTENT_MAP.keys())[:10]) + " etc"
     return [
         types.Tool(
             name="kosis_find_by_intent",
             description=(
-                "사용자의 연구/정책 의도를 자연어로 입력하면 관련 KOSIS 통계표를 자동으로 찾아줍니다.\n"
-                f"지원 의도: {intent_list}"
+                "Find KOSIS statistical tables by natural language query.\n"
+                f"Supported intents: {intent_list}"
             ),
             inputSchema={
                 "type": "object",
@@ -115,8 +115,8 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="kosis_analyze",
             description=(
-                "KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.\n"
-                "반환된 data 배열과 chart_hint를 활용해 Claude가 직접 시각화를 생성합니다."
+                "Fetch KOSIS statistical table data and return it with a chart_hint.\n"
+                "Use the returned data array and chart_hint to generate visualizations."
             ),
             inputSchema={
                 "type": "object",
@@ -140,7 +140,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="kosis_explain",
-            description="통계표의 조사 목적·주기·대상범위 등 메타데이터를 조회합니다.",
+            description="Fetch metadata for a KOSIS table: survey purpose, cycle, coverage, etc.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -152,7 +152,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="kosis_dashboard",
-            description="여러 통계표 데이터를 한꺼번에 조회해 반환합니다. Claude가 대시보드로 시각화합니다.",
+            description="Fetch multiple KOSIS tables at once. Returns data for Claude to render as a dashboard.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -172,7 +172,7 @@ async def list_tools() -> list[types.Tool]:
                             "required": ["org_id", "tbl_id", "title"],
                         },
                     },
-                    "dashboard_title": {"type": "string", "default": "KOSIS 통계 대시보드"},
+                    "dashboard_title": {"type": "string", "default": "KOSIS Dashboard"},
                 },
                 "required": ["datasets"],
             },
@@ -206,7 +206,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             start_prd_de=start_year, end_prd_de=end_year, new_est_prd_cnt=recent_n,
         )
         if not data:
-            return [types.TextContent(type="text", text="데이터가 없습니다.")]
+            return [types.TextContent(type="text", text="No data found.")]
         if not color_field:
             for c in ("ITM_NM", "C1_NM", "C2_NM"):
                 if c in set(data[0].keys()):
@@ -223,7 +223,6 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             "data": rows[:300],
         }
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
-
 
     elif name == "kosis_explain":
         data = await client.get_statistics_explanation(
@@ -270,7 +269,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
         fetched = await asyncio.gather(*[fetch_ds(ds) for ds in arguments["datasets"]])
         return [types.TextContent(type="text", text=json.dumps({
-            "dashboard_title": arguments.get("dashboard_title", "KOSIS 통계 대시보드"),
+            "dashboard_title": arguments.get("dashboard_title", "KOSIS Dashboard"),
             "count": len([f for f in fetched if f]),
             "datasets": [f for f in fetched if f],
         }, ensure_ascii=False, indent=2))]
@@ -278,10 +277,9 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     raise ValueError(f"Unknown tool: {name}")
 
 
-# -- Transports -----------------------------------------------------------------
+# ---------------------------------------------------------------------------
 sse_transport = SseServerTransport("/messages/")
 
-# Streamable HTTP session manager (stateless = new server instance per request)
 _session_manager = StreamableHTTPSessionManager(
     app=mcp_server,
     stateless=True,
@@ -291,13 +289,11 @@ _session_manager = StreamableHTTPSessionManager(
 
 @contextlib.asynccontextmanager
 async def _lifespan(app):
-    """Start StreamableHTTP session manager alongside the app."""
     async with _session_manager.run():
         yield
 
 
 async def _sse_asgi(scope: Scope, receive: Receive, send: Send) -> None:
-    """Raw ASGI handler for legacy SSE transport."""
     async with sse_transport.connect_sse(scope, receive, send) as streams:
         await mcp_server.run(
             streams[0], streams[1],
@@ -306,11 +302,7 @@ async def _sse_asgi(scope: Scope, receive: Receive, send: Send) -> None:
 
 
 async def handle_sse(request: Request) -> Response:
-    """
-    GET  /sse  -> legacy SSE transport (older Claude clients)
-    POST /sse  -> Streamable HTTP transport (newer Claude clients)
-    Both inject kosis_key via context var so tool handlers see it.
-    """
+    """GET /sse -> SSE transport, POST /sse -> Streamable HTTP transport."""
     api_key = request.query_params.get("kosis_key", "") or DEFAULT_API_KEY
     token = _api_key_ctx.set(api_key)
     try:
@@ -330,11 +322,11 @@ async def handle_health(request: Request) -> Response:
 async def handle_index(request: Request) -> Response:
     host = request.headers.get("host", "localhost")
     scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
-    base_url = f"{scheme}://{host}"
+    base = f"{scheme}://{host}"
     html = (
-        "<!DOCTYPE html>"
-        "<html lang='ko'><head>"
-        "<meta charset='UTF-8'><meta name='viewport' content='width=device-width,initial-scale=1'>"
+        "<!DOCTYPE html><html lang='ko'><head>"
+        "<meta charset='UTF-8'>"
+        "<meta name='viewport' content='width=device-width,initial-scale=1'>"
         "<title>KOSIS MCP</title>"
         "<style>"
         "*{box-sizing:border-box;margin:0;padding:0}"
@@ -353,37 +345,36 @@ async def handle_index(request: Request) -> Response:
         ".footer{text-align:center;padding:24px;font-size:.83rem;color:#94a3b8}"
         "</style></head><body>"
         "<div class='hero'>"
-        "  <h1>KOSIS MCP <span class='badge'>Running</span></h1>"
-        "  <p style='opacity:.85;margin-top:8px'>KOSIS 통계 데이터를 Claude가 검색·분석·시각화</p>"
+        "<h1>KOSIS MCP <span class='badge'>Running</span></h1>"
+        "<p style='opacity:.85;margin-top:8px'>KOSIS stats for Claude</p>"
         "</div>"
         "<div class='wrap'>"
-        "  <div class='card'>"
-        "    <h2>접속 URL 생성</h2>"
-        "    <input id='k' type='text' placeholder='KOSIS 인증키 입력 (kosis.kr/openapi)'/>"
-        "    <button class='btn' onclick='gen()'>생성 →</button>"
-        "    <div id='url-out'></div>"
-        "  </div>"
-        "  <div class='card'>"
-        "    <h2>Claude 연결 방법</h2>"
-        "    <p style='font-size:.92rem;color:#475569;margin-bottom:12px'>Claude 앱 → Settings → Integrations → Add custom integration</p>"
-        f"    <code id='cfg'>{base_url}/sse?kosis_key=YOUR_KEY</code>"
-        "  </div>"
+        "<div class='card'>"
+        "<h2>Generate connection URL</h2>"
+        "<input id='k' type='text' placeholder='KOSIS API key (kosis.kr/openapi)'/>"
+        "<button class='btn' onclick='gen()'>Generate</button>"
+        "<div id='url-out'></div>"
         "</div>"
-        "<div class='footer'><a href='https://kosis.kr'>통계청 KOSIS</a></div>"
+        "<div class='card'>"
+        "<h2>Connect Claude</h2>"
+        "<p style='font-size:.92rem;color:#475569;margin-bottom:12px'>Claude app &rarr; Settings &rarr; Integrations &rarr; Add custom integration</p>"
+        f"<code id='cfg'>{base}/sse?kosis_key=YOUR_KEY</code>"
+        "</div>"
+        "</div>"
+        "<div class='footer'><a href='https://kosis.kr'>KOSIS</a></div>"
         "<script>"
         "function gen(){"
-        "  const k=document.getElementById('k').value.trim();"
-        "  if(!k)return alert('인증키를 입력하세요');"
-        f"  const u=`{base_url}/sse?kosis_key=${{k}}`;"
-        "  document.getElementById('url-out').innerHTML='<code style=\"margin-top:8px;background:#0f172a;color:#7dd3fc;padding:13px 16px;border-radius:9px;display:block;word-break:break-all\">'+u+'</code>';"
-        "  document.getElementById('cfg').textContent=u;"
-        "}"
+        "const k=document.getElementById('k').value.trim();"
+        "if(!k)return alert('Enter API key');"
+        f"const u=`{base}/sse?kosis_key=${{k}}`;"
+        "document.getElementById('url-out').innerHTML='<code style=\"margin-top:8px;background:#0f172a;color:#7dd3fc;padding:13px 16px;border-radius:9px;display:block;word-break:break-all\">'+u+'</code>';"
+        "document.getElementById('cfg').textContent=u;}"
         "</script></body></html>"
     )
     return HTMLResponse(html)
 
 
-# -- Starlette app --------------------------------------------------------------
+# ---------------------------------------------------------------------------
 starlette_app = Starlette(
     lifespan=_lifespan,
     routes=[
@@ -404,4 +395,3 @@ starlette_app.add_middleware(
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(starlette_app, host="0.0.0.0", port=port)
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
