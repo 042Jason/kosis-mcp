@@ -1,7 +1,7 @@
 # KOSIS MCP 의존성 — Python 3.11+
 
-# MCP SDK (1.6 미만에서 SseServerTransport.handle_post_message 안정 동작)
-mcp>=1.0.0,<1.6.0
+# MCP SDK
+mcp>=1.0.0
 
 # 웹 서버 (SSE transport)
 uvicorn[standard]>=0.30.0

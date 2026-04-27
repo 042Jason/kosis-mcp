@@ -24,7 +24,7 @@ from mcp import types
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import HTMLResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 
 from kosis_client import KosisClient, INTENT_MAP
@@ -416,7 +416,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 sse_transport = SseServerTransport("/messages/")
 
 
-async def handle_sse(request: Request):
+async def handle_sse(request: Request) -> Response:
     api_key = request.query_params.get("kosis_key", "") or DEFAULT_API_KEY
     token = _api_key_ctx.set(api_key)
     try:
@@ -426,6 +426,7 @@ async def handle_sse(request: Request):
             await mcp_app.run(streams[0], streams[1], mcp_app.create_initialization_options())
     finally:
         _api_key_ctx.reset(token)
+    return Response()  # Starlette 1.0.0: request_response 래퍼가 반환값을 Response로 호출함
 
 
 async def handle_health(request: Request):
