@@ -255,29 +255,45 @@ class KosisClient:
         resp.raise_for_status()
         data = resp.json()
 
-        # ── objL error: fetch actual dimension codes and retry ───────────────
+        # ── objL error: fetch actual item codes and retry ────────────────────
         if isinstance(data, dict) and data.get("err") == "20":
             items = await self._get_item_codes(org_id, tbl_id)
             if items:
-                # Collect unique OBJ_ID values from items
-                obj_ids = []
-                seen = set()
+                # Group ITMC_IDs by OBJ_ID (dimension).
+                # objL1/objL2/... must be item codes (ITMC_ID), not dimension codes (OBJ_ID).
+                dim_order: list[str] = []
+                dim_items: dict[str, list[str]] = {}
                 for it in items:
-                    oid = it.get("OBJ_ID") or it.get("ITMC_ID") or ""
-                    if oid and oid not in seen:
-                        seen.add(oid)
-                        obj_ids.append(oid)
-                # Rebuild params with actual objL values
+                    obj_id = it.get("OBJ_ID", "")
+                    itmc_id = it.get("ITMC_ID", "")
+                    if not obj_id:
+                        continue
+                    if obj_id not in dim_items:
+                        dim_order.append(obj_id)
+                        dim_items[obj_id] = []
+                    if itmc_id:
+                        dim_items[obj_id].append(itmc_id)
+                # Rebuild params: objL{n} = first ITMC_ID of dimension n
                 params.pop("objL1", None)
                 params.pop("objL2", None)
                 params.pop("objL3", None)
-                for idx, oid in enumerate(obj_ids[:5], start=1):
-                    params[f"objL{idx}"] = oid
+                for idx, obj_id in enumerate(dim_order[:5], start=1):
+                    codes = dim_items.get(obj_id, [])
+                    params[f"objL{idx}"] = codes[0] if codes else obj_id
                 resp2 = await self._client.get(
                     f"{BASE_URL}/Param/statisticsParameterData.do", params=params
                 )
                 resp2.raise_for_status()
                 data = resp2.json()
+                # If still err 20, retry with OBJ_IDs directly (some tables use dim codes)
+                if isinstance(data, dict) and data.get("err") == "20":
+                    for idx, obj_id in enumerate(dim_order[:5], start=1):
+                        params[f"objL{idx}"] = obj_id
+                    resp3 = await self._client.get(
+                        f"{BASE_URL}/Param/statisticsParameterData.do", params=params
+                    )
+                    resp3.raise_for_status()
+                    data = resp3.json()
 
         if isinstance(data, dict) and "err" in data:
             raise ValueError(f"KOSIS API error: {data}  request_id: {data.get('request_id', '')}")
@@ -378,31 +394,4 @@ class KosisClient:
                         if r.get("TBL_ID") and r not in found:
                             found.append({
                                 "org_id": r.get("ORG_ID", ""),
-                                "tbl_id": r.get("TBL_ID", ""),
-                                "name": r.get("TBL_NM", ""),
-                                "category": intent_cfg["intent"],
-                                "vw_cd": intent_cfg["vw_cd"],
-                            })
-                except Exception:
-                    pass
-            return found
-
-        tasks = [search_one(cfg) for cfg in intents]
-        nested = await asyncio.gather(*tasks, return_exceptions=True)
-
-        all_tables = []
-        seen_ids = set()
-        for group in nested:
-            if isinstance(group, list):
-                for t in group:
-                    key = (t["org_id"], t["tbl_id"])
-                    if key not in seen_ids:
-                        seen_ids.add(key)
-                        all_tables.append(t)
-
-        return {
-            "detected_intents": [i["intent"] for i in intents],
-            "query": query,
-            "total_found": len(all_tables),
-            "tables": all_tables[:max_results],
-        }
+                                "tbl_id": r.get("TBL_ID", "
