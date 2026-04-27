@@ -1,0 +1,150 @@
+# 📊 KOSIS MCP 서버
+
+KOSIS(국가통계포털) 데이터를 Claude AI가 자동으로 **검색·분석·시각화**해주는 MCP 서버입니다.  
+"청년정책 보고서 쓰고 있어, 관련 통계 찾아줘" 같은 자연어 한 마디로 통계 탐색부터 차트 생성까지 한번에 처리합니다.
+
+---
+
+## ✨ 주요 기능
+
+| 기능 | 설명 |
+|------|------|
+| **의도 기반 검색** | 자연어로 연구 목적을 설명하면 관련 KOSIS 통계표를 자동 탐색 |
+| **데이터 + 차트 통합** | 통계 조회와 시각화를 툴 하나로 처리 (꺾은선·막대·파이 등 7종) |
+| **다중 대시보드** | 여러 통계표를 하나의 대시보드로 묶어 시각화 |
+| **카테고리 탐색** | 주제별·대상별·이슈별 KOSIS 카테고리 직접 탐색 |
+| **멀티유저 지원** | 서버 1개로 여러 사용자가 각자 KOSIS 키를 URL에 붙여 사용 |
+
+---
+
+## 🚀 사용 방법 (3단계)
+
+### 1단계 — KOSIS 인증키 발급
+
+1. [kosis.kr/openapi](https://kosis.kr/openapi/) 접속 후 회원가입
+2. **활용신청 → 인증키 발급** 클릭 (즉시 발급)
+3. 발급된 인증키 복사
+
+### 2단계 — Claude에 연결
+
+Claude 앱 → **Settings → Integrations → Add custom integration**에 아래 URL 입력:
+
+```
+https://kosis-mcp-production.up.railway.app/sse?kosis_key=발급받은_인증키
+```
+
+> **서버 홈페이지**: https://kosis-mcp-production.up.railway.app  
+> 홈페이지에서 인증키를 입력하면 접속 URL이 자동 생성됩니다.
+
+### 3단계 — Claude에게 말하기
+
+연결 후 Claude에게 바로 자연어로 요청하세요:
+
+```
+청년정책 보고서 작성 중인데, 청년 고용·주거 관련 KOSIS 통계 찾아서 분석해줘
+```
+
+```
+저소득 한부모 가정을 위한 정책 마련 중이야. 관련 통계 차트로 보여줘
+```
+
+```
+인구 소멸 논문 쓰고 있어. 합계출산율과 고령화율 추이 그래프 만들어줘
+```
+
+```
+최근 10년간 청년 실업률 꺾은선 그래프로 보여줘
+```
+
+---
+
+## 💬 사용 예시
+
+### 예시 1 — 의도 기반 통계 탐색
+
+**사용자:** "청년정책 보고서 작성 중인데 고용·주거 관련 통계 찾아줘"  
+**Claude:** 청년/고용/주거 3개 의도를 자동 감지 → 관련 통계표 100여 개 탐색 후 정리
+
+### 예시 2 — 데이터 분석 + 차트 생성
+
+**사용자:** "합계출산율 2000년부터 현재까지 꺾은선 그래프로 보여줘"  
+**Claude:** KOSIS에서 데이터 조회 → 꺾은선 차트 생성 → 이미지로 표시
+
+### 예시 3 — 정책 연구 지원
+
+**사용자:** "장애인 복지 예산 관련 통계 분석해줘"  
+**Claude:** 장애인 관련 통계표 자동 탐색 → 주요 지표 데이터 조회 → 분석 결과 제공
+
+---
+
+## 🗂 지원 연구·정책 분야
+
+자연어 질의에 아래 키워드가 포함되면 관련 통계를 자동으로 탐색합니다.
+
+**대상별**: 청년 · 아동·보육 · 청소년 · 노인·고령자 · 여성 · 장애인 · 다문화 · 한부모
+
+**이슈별**: 저출산 · 고령화 · 인구소멸 · 1인가구 · 저소득·빈곤 · 지역균형발전
+
+**주제별**: 고용·실업 · 교육 · 주거·주택 · 소득·임금 · 복지 · 보건·의료 · 인구
+
+---
+
+## ⚙️ MCP 도구 목록
+
+| 도구 | 설명 |
+|------|------|
+| `kosis_find_by_intent` | 자연어 의도 → 관련 통계표 자동 탐색 |
+| `kosis_analyze` | 통계 데이터 조회 + 차트 생성 통합 처리 |
+| `kosis_dashboard` | 여러 통계를 하나의 대시보드로 시각화 |
+| `kosis_browse` | KOSIS 카테고리 트리 탐색 |
+| `kosis_explain` | 통계표 조사 목적·주기·대상 범위 조회 |
+
+---
+
+## 🏗 직접 배포하기
+
+### Railway (권장)
+
+[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template)
+
+1. 이 레포를 Fork
+2. Railway에서 **New Project → Deploy from GitHub**
+3. 환경변수 설정: `KOSIS_API_KEY` (선택, 기본 키), `KOSIS_OUTPUT_DIR=/tmp/kosis_charts`
+4. 배포 완료 후 발급된 도메인 사용
+
+### 로컬 실행
+
+```bash
+git clone https://github.com/042Jason/kosis-mcp
+cd kosis-mcp
+pip install -r requirements.txt
+
+# Windows PowerShell
+$env:KOSIS_API_KEY = "발급받은_인증키"
+python server.py
+```
+
+접속 URL: `http://localhost:8000/sse?kosis_key=YOUR_KEY`
+
+### Docker
+
+```bash
+docker build -t kosis-mcp .
+docker run -p 8000:8000 -e KOSIS_API_KEY=YOUR_KEY kosis-mcp
+```
+
+---
+
+## 🔧 기술 스택
+
+- **MCP SDK** (Python) — Model Context Protocol SSE transport
+- **Starlette + uvicorn** — 비동기 HTTP 서버
+- **httpx** — KOSIS OpenAPI 비동기 호출
+- **pandas + plotly** — 데이터 정제 및 시각화
+- **kaleido** — 서버 사이드 PNG 렌더링
+
+---
+
+## 📄 라이선스
+
+MIT License · 데이터 출처: [통계청 KOSIS](https://kosis.kr)
