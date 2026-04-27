@@ -8,7 +8,9 @@ RUN apt-get update && apt-get install -y \
     fonts-nanum \
     fonts-nanum-coding \
     fonts-nanum-extra \
-    && rm -rf /var/lib/apt/lists/*
+    fonts-noto-cjk \
+    && rm -rf /var/lib/apt/lists/* \
+    && fc-cache -fv
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
