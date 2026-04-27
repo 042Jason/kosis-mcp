@@ -60,9 +60,16 @@ def _save_html(fig, path: str):
 
 def _apply_layout(fig, title: str):
     """공통 레이아웃: 한국어 폰트, 여백, 테마."""
+    # Linux(Railway): NanumGothic / Noto Sans CJK KR 우선
+    # macOS: Apple SD Gothic Neo
+    # Windows: Malgun Gothic
+    korean_fonts = (
+        "NanumGothic, Noto Sans CJK KR, Noto Sans KR, "
+        "Apple SD Gothic Neo, Malgun Gothic, sans-serif"
+    )
     fig.update_layout(
-        title=dict(text=title, font=dict(size=16)),
-        font=dict(family="Malgun Gothic, NanumGothic, Apple SD Gothic Neo, sans-serif", size=12),
+        title=dict(text=title, font=dict(size=16, family=korean_fonts)),
+        font=dict(family=korean_fonts, size=12),
         template="plotly_white",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
         margin=dict(l=60, r=30, t=70, b=60),
@@ -285,7 +292,10 @@ def create_dashboard(
 
     fig.update_layout(
         template="plotly_white",
-        font=dict(family="Malgun Gothic, NanumGothic, sans-serif", size=11),
+        font=dict(
+            family="NanumGothic, Noto Sans CJK KR, Apple SD Gothic Neo, Malgun Gothic, sans-serif",
+            size=11
+        ),
         height=420 * rows,
         showlegend=True,
     )
