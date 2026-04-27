@@ -5,6 +5,9 @@ WORKDIR /app
 # 시스템 의존성 (kaleido PNG 렌더링용)
 RUN apt-get update && apt-get install -y \
     chromium \
+    fonts-nanum \
+    fonts-nanum-coding \
+    fonts-nanum-extra \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
