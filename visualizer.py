@@ -138,6 +138,25 @@ def create_chart(
         unit = vals.iloc[0] if not vals.empty else ""
     y_label = f"{y_field} ({unit})" if unit else y_field
 
+    # ── 카테고리 과다 시 자동 필터링 (그래프 가독성) ────────────
+    if color_field and color_field in df.columns:
+        n_unique = df[color_field].nunique()
+        if n_unique > 12:
+            # 1순위: "전국" / "합계" / "전체" 행만 추출
+            mask = df[color_field].astype(str).str.contains("전국|합계|전체|계$", na=False, regex=True)
+            if mask.any():
+                df = df[mask].copy()
+            else:
+                # 2순위: 평균값 기준 상위 10개 카테고리만
+                top_vals = (
+                    df.groupby(color_field)[y_field]
+                    .mean()
+                    .dropna()
+                    .nlargest(10)
+                    .index
+                )
+                df = df[df[color_field].isin(top_vals)].copy()
+
     common = dict(
         x=x_field, y=y_field,
         labels={y_field: y_label, x_field: "시점"},
