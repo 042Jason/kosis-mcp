@@ -101,50 +101,6 @@ https://kosis-mcp-production.up.railway.app/sse?kosis_key=발급받은_인증키
 
 ---
 
-## 🏗 직접 배포하기
-
-### Railway (권장)
-
-[![Deploy on Railway](https://railway.app/button.svg)](https://railway.app/new/template)
-
-1. 이 레포를 Fork
-2. Railway에서 **New Project → Deploy from GitHub**
-3. 환경변수 설정: `KOSIS_API_KEY` (선택, 기본 키), `KOSIS_OUTPUT_DIR=/tmp/kosis_charts`
-4. 배포 완료 후 발급된 도메인 사용
-
-### 로컬 실행
-
-```bash
-git clone https://github.com/042Jason/kosis-mcp
-cd kosis-mcp
-pip install -r requirements.txt
-
-# Windows PowerShell
-$env:KOSIS_API_KEY = "발급받은_인증키"
-python server.py
-```
-
-접속 URL: `http://localhost:8000/sse?kosis_key=YOUR_KEY`
-
-### Docker
-
-```bash
-docker build -t kosis-mcp .
-docker run -p 8000:8000 -e KOSIS_API_KEY=YOUR_KEY kosis-mcp
-```
-
----
-
-## 🔧 기술 스택
-
-- **MCP SDK** (Python) — Model Context Protocol SSE transport
-- **Starlette + uvicorn** — 비동기 HTTP 서버
-- **httpx** — KOSIS OpenAPI 비동기 호출
-- **pandas + plotly** — 데이터 정제 및 시각화
-- **kaleido** — 서버 사이드 PNG 렌더링
-
----
-
 ## 📄 라이선스
 
 MIT License · 데이터 출처: [통계청 KOSIS](https://kosis.kr)
