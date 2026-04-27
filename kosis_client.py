@@ -158,15 +158,19 @@ def detect_intent(query: str) -> list[dict]:
     return matched
 
 
+# Module-level shared httpx client — one connection pool for all API keys
+_shared_http_client = httpx.AsyncClient(timeout=30.0)
+
+
 class KosisClient:
-    """KOSIS OpenAPI async HTTP client."""
+    """KOSIS OpenAPI async HTTP client (uses shared connection pool)."""
 
     def __init__(self, api_key: str):
         self.api_key = api_key
-        self._client = httpx.AsyncClient(timeout=30.0)
+        self._client = _shared_http_client
 
     async def close(self):
-        await self._client.aclose()
+        pass  # shared client — do not close per instance
 
     # ── 1. Category browsing ─────────────────────────────────────────────────
     async def browse_categories(
@@ -329,7 +333,10 @@ class KosisClient:
         except Exception:
             pass
 
-        top_level = await self.browse_categories(vw_cd=vw_cd, parent_list_id="A")
+        try:
+            top_level = await self.browse_categories(vw_cd=vw_cd, parent_list_id="A")
+        except Exception:
+            return []
         tasks = []
         for cat in top_level[:15]:
             list_id = cat.get("LIST_ID", "")

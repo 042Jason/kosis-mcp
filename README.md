@@ -1,7 +1,7 @@
 # 📊 KOSIS MCP 서버
 
-[국가데이터처](https://www.kostat.go.kr) KOSIS(국가통계포털) 데이터를 Claude AI가 자동으로 **검색·분석·시각화**해주는 MCP 서버입니다.  
-"청년정책 보고서 쓰고 있어, 관련 통계 찾아줘" 같은 자연어 한 마디로 통계 탐색부터 차트 생성까지 한 번에 처리합니다.
+KOSIS(국가통계포털) 데이터를 Claude AI가 자동으로 **검색·분석·시각화**해주는 MCP 서버입니다.  
+"청년정책 보고서 쓰고 있어, 관련 통계 찾아줘" 같은 자연어 한 마디로 통계 탐색부터 차트 생성까지 한번에 처리합니다.
 
 ---
 
@@ -11,8 +11,9 @@
 |------|------|
 | **의도 기반 검색** | 자연어로 연구 목적을 설명하면 관련 KOSIS 통계표를 자동 탐색 |
 | **데이터 조회** | 통계표 데이터를 조회해 Claude에게 전달 |
-| **Claude 자체 시각화** | Claude가 직접 차트 생성 (꺾은선·막대·파이 등) |
+| **Claude 자체 시각화** | Claude가 직접 차트를 생성 (꺾은선·막대·파이 등 다양한 형태) |
 | **다중 대시보드** | 여러 통계표를 한꺼번에 조회해 대시보드로 시각화 |
+| **카테고리 탐색** | 주제별·대상별·이슈별 KOSIS 카테고리 직접 탐색 |
 | **멀티유저 지원** | 서버 1개로 여러 사용자가 각자 KOSIS 키를 URL에 붙여 사용 |
 
 ---
@@ -24,8 +25,6 @@
 1. [kosis.kr/openapi](https://kosis.kr/openapi/) 접속 후 회원가입
 2. **활용신청 → 인증키 발급** 클릭 (즉시 발급)
 3. 발급된 인증키 복사
-
-> KOSIS는 국가데이터처가 운영하는 국가통계포털입니다.
 
 ### 2단계 — Claude에 연결
 
@@ -40,7 +39,7 @@ https://kosis-mcp-production.up.railway.app/sse?kosis_key=발급받은_인증키
 
 ### 3단계 — Claude에게 말하기
 
-연결 후 Claude에게 자연어로 요청하세요:
+연결 후 Claude에게 바로 자연어로 요청하세요:
 
 ```
 청년정책 보고서 작성 중인데, 청년 고용·주거 관련 KOSIS 통계 찾아서 분석해줘
@@ -98,6 +97,7 @@ https://kosis-mcp-production.up.railway.app/sse?kosis_key=발급받은_인증키
 | `kosis_find_by_intent` | 자연어 의도 → 관련 통계표 자동 탐색 |
 | `kosis_analyze` | 통계 데이터 조회 후 Claude에게 전달 (Claude가 차트 생성) |
 | `kosis_dashboard` | 여러 통계를 한꺼번에 조회 (Claude가 대시보드로 시각화) |
+| `kosis_browse` | KOSIS 카테고리 트리 탐색 |
 | `kosis_explain` | 통계표 조사 목적·주기·대상 범위 조회 |
 
 ---
@@ -106,7 +106,7 @@ https://kosis-mcp-production.up.railway.app/sse?kosis_key=발급받은_인증키
 
 ```
 kosis-mcp/
-├── server.py          # MCP 서버 (SSE + Streamable HTTP transport, 4개 도구)
+├── server.py          # MCP 서버 (SSE transport, 5개 도구)
 ├── kosis_client.py    # KOSIS OpenAPI 클라이언트 + 의도 탐지
 ├── requirements.txt   # Python 의존성
 ├── Dockerfile         # Railway 배포용
@@ -117,4 +117,4 @@ kosis-mcp/
 
 ## 📄 라이선스
 
-MIT License · 데이터 출처: [국가데이터처 KOSIS](https://kosis.kr)
+MIT License · 데이터 출처: [통계청 KOSIS](https://kosis.kr)

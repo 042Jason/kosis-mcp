@@ -270,7 +270,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         fetched = await asyncio.gather(*[fetch_ds(ds) for ds in arguments["datasets"]])
         return [types.TextContent(type="text", text=json.dumps({
             "dashboard_title": arguments.get("dashboard_title", "KOSIS Dashboard"),
-            "count": len([f for f in fetched if f]),
+            "count": len([f for f in fetched if f and "error" not in f]),
             "datasets": [f for f in fetched if f],
         }, ensure_ascii=False, indent=2))]
 
