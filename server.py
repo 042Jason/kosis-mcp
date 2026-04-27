@@ -139,20 +139,6 @@ async def list_tools() -> list[types.Tool]:
             },
         ),
         types.Tool(
-            name="kosis_browse",
-            description=(
-                "KOSIS 카테고리 트리를 탐색합니다. org_id/tbl_id를 모를 때 사용.\n"
-                "vw_cd: MT_ZTITLE(주제별) MT_TM1_TITLE(대상별) MT_TM2_TITLE(이슈별)"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "vw_cd": {"type": "string", "default": "MT_ZTITLE"},
-                    "parent_list_id": {"type": "string", "default": "A"},
-                },
-            },
-        ),
-        types.Tool(
             name="kosis_explain",
             description="통계표의 조사 목적·주기·대상범위 등 메타데이터를 조회합니다.",
             inputSchema={
@@ -238,24 +224,6 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         }
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
-    elif name == "kosis_browse":
-        result = await client.browse_categories(
-            vw_cd=arguments.get("vw_cd", "MT_ZTITLE"),
-            parent_list_id=arguments.get("parent_list_id", "A"),
-        )
-        tables = [
-            {"org_id": r.get("ORG_ID"), "tbl_id": r.get("TBL_ID"),
-             "name": r.get("TBL_NM"), "updated": r.get("SEND_DE")}
-            for r in result if r.get("TBL_ID")
-        ]
-        cats = [
-            {"list_id": r.get("LIST_ID"), "name": r.get("LIST_NM")}
-            for r in result if r.get("LIST_ID") and not r.get("TBL_ID")
-        ]
-        return [types.TextContent(type="text", text=json.dumps({
-            "sub_categories": cats, "tables": tables[:30],
-            "tip": "sub_categories의 list_id를 parent_list_id로 넣거나, tables의 org_id+tbl_id로 kosis_analyze 호출",
-        }, ensure_ascii=False, indent=2))]
 
     elif name == "kosis_explain":
         data = await client.get_statistics_explanation(
@@ -436,3 +404,4 @@ starlette_app.add_middleware(
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  
