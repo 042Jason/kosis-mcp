@@ -118,3 +118,4 @@ kosis-mcp/
 ## 📄 라이선스
 
 MIT License · 데이터 출처: [통계청 KOSIS](https://kosis.kr)
+# KOSIS MCP - Tue Apr 28 01:08:52 UTC 2026
