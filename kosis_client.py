@@ -414,6 +414,45 @@ class KosisClient:
                 resp3.raise_for_status()
                 data = resp3.json()
 
+        # ── err 31: 40,000셀 초과 → 기간 자동 축소 후 재시도 (최대 3회) ────
+        retries = 3
+        while isinstance(data, dict) and data.get("err") == "31" and retries > 0:
+            retries -= 1
+            if new_est_prd_cnt and new_est_prd_cnt > 1:
+                new_est_prd_cnt = max(1, new_est_prd_cnt // 2)
+            elif start_prd_de and end_prd_de:
+                # 기간 범위를 절반으로 축소
+                try:
+                    s = int(start_prd_de[:4])
+                    e = int(end_prd_de[:4])
+                    mid = (s + e) // 2
+                    start_prd_de = str(mid) + start_prd_de[4:]
+                except Exception:
+                    break
+            else:
+                break  # 더 줄일 방법 없음
+
+            # 줄인 기간으로 재시도 파라미터 재구성
+            reduced = _build_params(**retry_extra) if 'retry_extra' in dir() else _build_params(objL1=obj_l1, itmId=itm_id)
+            if new_est_prd_cnt:
+                reduced["newEstPrdCnt"] = str(new_est_prd_cnt)
+                reduced.pop("startPrdDe", None)
+                reduced.pop("endPrdDe", None)
+            for ep in [
+                f"{BASE_URL}/Param/statisticsParameterData.do",
+                f"{BASE_URL}/statisticsData.do",
+            ]:
+                try:
+                    r = await self._client.get(ep, params=reduced, timeout=30.0)
+                    r.raise_for_status()
+                    data = r.json()
+                    if isinstance(data, list):
+                        break
+                    if isinstance(data, dict) and data.get("err") != "31":
+                        break
+                except Exception:
+                    continue
+
         if isinstance(data, dict) and "err" in data:
             raise ValueError(
                 f"KOSIS API error: {data}  request_id: {data.get('request_id', '')}"
