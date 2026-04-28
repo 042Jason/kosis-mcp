@@ -241,26 +241,39 @@ class KosisClient:
     # ── 2. Fetch item/dimension codes for a table ────────────────────────────
     async def _get_item_codes(self, org_id: str, tbl_id: str) -> list[dict]:
         """
-        Returns the list of classification dimensions for a table.
-        Used to build objL1/objL2/... parameters when 'ALL' is rejected.
+        Returns classification + statistical item codes for a table.
+        Tries Param/statisticsItemList.do first (newer path),
+        falls back to old statisticsItemList.do.
+        HTML response = endpoint redirected → skip.
         """
-        params = {
-            "method": "getList",
-            "apiKey": self.api_key,
-            "orgId": org_id,
-            "tblId": tbl_id,
-            "itmDiv": "all",
-            "format": "json",
-            "jsonVD": "Y",
-            "errMsg": "Y",
-        }
-        try:
-            resp = await self._client.get(f"{BASE_URL}/statisticsItemList.do", params=params)
-            resp.raise_for_status()
-            data = resp.json()
-            return data if isinstance(data, list) else []
-        except Exception:
-            return []
+        for endpoint in [
+            f"{BASE_URL}/Param/statisticsItemList.do",
+            f"{BASE_URL}/statisticsItemList.do",
+        ]:
+            try:
+                params = {
+                    "method": "getList",
+                    "apiKey": self.api_key,
+                    "orgId": org_id,
+                    "tblId": tbl_id,
+                    "itmDiv": "all",
+                    "format": "json",
+                    "jsonVD": "Y",
+                    "errMsg": "Y",
+                }
+                resp = await self._client.get(endpoint, params=params, timeout=15.0)
+                if resp.status_code != 200:
+                    continue
+                # HTML 응답 = 리다이렉트된 엔드포인트 → 건너뜀
+                ct = resp.headers.get("content-type", "")
+                if "html" in ct.lower():
+                    continue
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    return data
+            except Exception:
+                continue
+        return []
 
     # ── 3. Statistics data ───────────────────────────────────────────────────
     async def get_statistics_data(
@@ -299,42 +312,51 @@ class KosisClient:
         resp.raise_for_status()
         data = resp.json()
 
-        # ── objL error: fetch actual item codes and retry ────────────────────
+        # ── objL / itmId error: fetch actual codes and retry ─────────────────
         if isinstance(data, dict) and data.get("err") == "20":
             items = await self._get_item_codes(org_id, tbl_id)
+
+            # 분류 항목(objL) 과 통계 항목(itmId) 분리
+            # OBJ_ID 있음 → 분류(분류코드) → objL 파라미터
+            # OBJ_ID 없음 → 통계항목(항목코드) → itmId 파라미터
             dim_order: list[str] = []
             dim_items: dict[str, list[str]] = {}
-            if items:
-                # Group ITMC_IDs by OBJ_ID (dimension).
-                # objL1/objL2/... must be item codes (ITMC_ID), not dimension codes (OBJ_ID).
-                for it in items:
-                    obj_id = it.get("OBJ_ID", "")
-                    itmc_id = it.get("ITMC_ID", "")
-                    if not obj_id:
-                        continue
+            itm_ids: list[str] = []
+            for it in items:
+                obj_id = it.get("OBJ_ID", "")
+                itmc_id = it.get("ITMC_ID", "")
+                itm_id = it.get("ITM_ID", "")
+                if obj_id:
                     if obj_id not in dim_items:
                         dim_order.append(obj_id)
                         dim_items[obj_id] = []
                     if itmc_id:
                         dim_items[obj_id].append(itmc_id)
-                # Rebuild params: objL{n} = ALL codes of dimension n joined with '+'
-                # KOSIS API: multiple codes → '+' separator (e.g. "11+21+31")
-                # 40,000 cell limit → cap at 30 codes per dimension
+                else:
+                    code = itm_id or itmc_id
+                    if code:
+                        itm_ids.append(code)
+
+            if items:
+                # objL 재구성: ITMC_ID 목록 '+' 조인, 40,000셀 제한으로 30개 캡
                 for k in list(params.keys()):
                     if k.startswith("objL"):
                         params.pop(k)
                 for idx, obj_id in enumerate(dim_order[:8], start=1):
                     codes = dim_items.get(obj_id, [])
-                    if codes:
-                        params[f"objL{idx}"] = "+".join(codes[:30])
-                    else:
-                        params[f"objL{idx}"] = obj_id
+                    params[f"objL{idx}"] = "+".join(codes[:30]) if codes else obj_id
+
+                # itmId: 실제 항목 코드가 있으면 사용, 없으면 ALL 유지
+                if itm_ids:
+                    params["itmId"] = "+".join(itm_ids[:30])
+
                 resp2 = await self._client.get(
                     f"{BASE_URL}/Param/statisticsParameterData.do", params=params
                 )
                 resp2.raise_for_status()
                 data = resp2.json()
-                # If still err 20, retry with OBJ_IDs directly (some tables use dim codes)
+
+                # OBJ_ID 직접 사용 재시도 (일부 테이블은 ITMC_ID 대신 OBJ_ID 요구)
                 if isinstance(data, dict) and data.get("err") == "20":
                     for idx, obj_id in enumerate(dim_order[:8], start=1):
                         params[f"objL{idx}"] = obj_id
@@ -344,21 +366,26 @@ class KosisClient:
                     resp3.raise_for_status()
                     data = resp3.json()
 
-            # 최종 폴백: 표준 statisticsData.do (매뉴얼 공식 엔드포인트)
-            # items 여부 무관하게 err 20 지속 시 시도
+            # 최종 폴백: 표준 statisticsData.do — 모든 objL 차원 ALL로 세팅
             if isinstance(data, dict) and data.get("err") == "20":
                 std_params = {
                     "method": "getList",
                     "apiKey": self.api_key,
                     "orgId": org_id,
                     "tblId": tbl_id,
-                    "objL1": dim_order[0] if dim_order else "ALL",
-                    "itmId": "ALL",
                     "prdSe": prd_se,
                     "format": "json",
                     "jsonVD": "Y",
                     "errMsg": "Y",
                 }
+                # 발견된 차원 수만큼 ALL 세팅, 없으면 최소 objL1=ALL
+                if dim_order:
+                    for idx, obj_id in enumerate(dim_order[:8], start=1):
+                        codes = dim_items.get(obj_id, [])
+                        std_params[f"objL{idx}"] = "+".join(codes[:30]) if codes else "ALL"
+                else:
+                    std_params["objL1"] = "ALL"
+                std_params["itmId"] = "+".join(itm_ids[:30]) if itm_ids else "ALL"
                 if start_prd_de:
                     std_params["startPrdDe"] = start_prd_de
                 if end_prd_de:
