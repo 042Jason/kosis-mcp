@@ -1,5 +1,5 @@
 """
-KOSIS MCP Server - Streamable HTTP transport (MCP 2025-03-26 spec)
+KOSIS MCP Server - FastMCP + Streamable HTTP (MCP 2025-03-26)
 """
 
 import asyncio
@@ -9,20 +9,15 @@ import os
 
 import pandas as pd
 import uvicorn
-from mcp.server import Server
-from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
-from mcp import types
-from starlette.applications import Starlette
+from mcp.server.fastmcp import FastMCP
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from kosis_client import KosisClient, INTENT_MAP
 
 DEFAULT_API_KEY = os.environ.get("KOSIS_API_KEY", "")
-
 _api_key_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
     "kosis_api_key", default=DEFAULT_API_KEY
 )
@@ -83,263 +78,54 @@ def _process_data(data: list, color_field=None):
     return df.to_dict(orient="records"), summary, unit
 
 
-mcp_server = Server("kosis-mcp")
+# ---------------------------------------------------------------------------
+# FastMCP 인스턴스
+# ---------------------------------------------------------------------------
+mcp = FastMCP("kosis-mcp")
 
 
-@mcp_server.list_tools()
-async def list_tools() -> list[types.Tool]:
-    intent_list = ", ".join(list(INTENT_MAP.keys())[:10]) + " 등"
-    return [
-        types.Tool(
-            name="kosis_find_by_intent",
-            description=(
-                "사용자의 연구/정책 의도를 자연어로 입력하면 관련 KOSIS 통계표를 자동으로 찾아줍니다.\n"
-                f"지원 의도: {intent_list}"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "max_results": {"type": "integer", "default": 12},
-                },
-                "required": ["query"],
-            },
-        ),
-        types.Tool(
-            name="kosis_analyze",
-            description="KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "org_id": {"type": "string"},
-                    "tbl_id": {"type": "string"},
-                    "title": {"type": "string"},
-                    "chart_type": {
-                        "type": "string",
-                        "enum": ["line", "bar", "bar_h", "pie", "scatter", "area", "multi_line"],
-                        "default": "line",
-                    },
-                    "start_year": {"type": "string"},
-                    "end_year": {"type": "string"},
-                    "recent_n": {"type": "integer", "default": 20},
-                    "prd_se": {"type": "string", "default": "Y"},
-                    "color_field": {"type": "string"},
-                },
-                "required": ["org_id", "tbl_id", "title"],
-            },
-        ),
-        types.Tool(
-            name="kosis_browse",
-            description=(
-                "KOSIS 카테고리 트리를 탐색합니다. org_id/tbl_id를 모를 때 사용.\n"
-                "vw_cd: MT_ZTITLE(주제별) MT_TM1_TITLE(대상별) MT_TM2_TITLE(이슈별)"
-            ),
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "vw_cd": {"type": "string", "default": "MT_ZTITLE"},
-                    "parent_list_id": {"type": "string", "default": "A"},
-                },
-            },
-        ),
-        types.Tool(
-            name="kosis_explain",
-            description="통계표의 조사 목적, 주기, 대상범위 등 메타데이터를 조회합니다.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "org_id": {"type": "string"},
-                    "tbl_id": {"type": "string"},
-                },
-                "required": ["org_id", "tbl_id"],
-            },
-        ),
-        types.Tool(
-            name="kosis_dashboard",
-            description="여러 통계표 데이터를 한꺼번에 조회해 반환합니다.",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "datasets": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "org_id": {"type": "string"},
-                                "tbl_id": {"type": "string"},
-                                "title": {"type": "string"},
-                                "chart_type": {"type": "string", "default": "line"},
-                                "start_year": {"type": "string"},
-                                "end_year": {"type": "string"},
-                                "color_field": {"type": "string"},
-                            },
-                            "required": ["org_id", "tbl_id", "title"],
-                        },
-                    },
-                    "dashboard_title": {"type": "string", "default": "KOSIS 통계 대시보드"},
-                },
-                "required": ["datasets"],
-            },
-        ),
-    ]
+# ---------------------------------------------------------------------------
+# Discovery / OAuth 엔드포인트 (Claude가 탐색 시 200 응답)
+# ---------------------------------------------------------------------------
+def _base_url(request: Request) -> str:
+    scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
+    host = request.headers.get("host", "localhost")
+    return f"{scheme}://{host}"
 
 
-@mcp_server.call_tool()
-async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-    client = _get_client()
-
-    if name == "kosis_find_by_intent":
-        result = await client.search_by_intent(
-            query=arguments["query"],
-            max_results=arguments.get("max_results", 12),
-        )
-        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
-
-    if name == "kosis_analyze":
-        org_id = arguments["org_id"]
-        tbl_id = arguments["tbl_id"]
-        title = arguments["title"]
-        chart_type = arguments.get("chart_type", "line")
-        color_field = arguments.get("color_field")
-        prd_se = arguments.get("prd_se", "Y")
-        start_year = arguments.get("start_year")
-        end_year = arguments.get("end_year")
-        recent_n = arguments.get("recent_n", 20)
-        data = await client.get_statistics_data(
-            org_id=org_id, tbl_id=tbl_id, prd_se=prd_se,
-            start_prd_de=start_year, end_prd_de=end_year, new_est_prd_cnt=recent_n,
-        )
-        if not data:
-            return [types.TextContent(type="text", text="데이터가 없습니다.")]
-        if not color_field:
-            for c in ("ITM_NM", "C1_NM", "C2_NM"):
-                if c in set(data[0].keys()):
-                    color_field = c
-                    break
-        rows, summary, unit = _process_data(data, color_field)
-        result = {
-            "title": title, "org_id": org_id, "tbl_id": tbl_id,
-            "unit": unit, "rows": len(rows), "summary": summary,
-            "chart_hint": {
-                "chart_type": chart_type,
-                "x_field": "PRD_DE", "y_field": "DT", "color_field": color_field,
-            },
-            "data": rows[:300],
-        }
-        return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
-
-    if name == "kosis_browse":
-        result = await client.browse_categories(
-            vw_cd=arguments.get("vw_cd", "MT_ZTITLE"),
-            parent_list_id=arguments.get("parent_list_id", "A"),
-        )
-        tables = [
-            {"org_id": r.get("ORG_ID"), "tbl_id": r.get("TBL_ID"),
-             "name": r.get("TBL_NM"), "updated": r.get("SEND_DE")}
-            for r in result if r.get("TBL_ID")
-        ]
-        cats = [
-            {"list_id": r.get("LIST_ID"), "name": r.get("LIST_NM")}
-            for r in result if r.get("LIST_ID") and not r.get("TBL_ID")
-        ]
-        return [types.TextContent(type="text", text=json.dumps({
-            "sub_categories": cats, "tables": tables[:30],
-            "tip": "sub_categories의 list_id를 parent_list_id로 넣거나, tables의 org_id+tbl_id로 kosis_analyze 호출",
-        }, ensure_ascii=False, indent=2))]
-
-    if name == "kosis_explain":
-        data = await client.get_statistics_explanation(
-            org_id=arguments["org_id"], tbl_id=arguments["tbl_id"]
-        )
-        key_fields = {"TBL_NM", "STAT_NM", "CYCLE", "SURVEY_PURPOSE", "SURVEY_RANGE", "CONTACT_ORG"}
-        compact = [
-            {k: v for k, v in row.items() if k in key_fields or not k.endswith("_CD")}
-            for row in data
-        ]
-        return [types.TextContent(type="text", text=json.dumps(compact[:5], ensure_ascii=False, indent=2))]
-
-    if name == "kosis_dashboard":
-        async def fetch_ds(ds_cfg):
-            try:
-                data = await client.get_statistics_data(
-                    org_id=ds_cfg["org_id"], tbl_id=ds_cfg["tbl_id"],
-                    prd_se=ds_cfg.get("prd_se", "Y"),
-                    start_prd_de=ds_cfg.get("start_year"),
-                    end_prd_de=ds_cfg.get("end_year"),
-                    new_est_prd_cnt=20,
-                )
-                if not data:
-                    return None
-                cf = ds_cfg.get("color_field")
-                if not cf:
-                    for c in ("ITM_NM", "C1_NM", "C2_NM"):
-                        if c in set(data[0].keys()):
-                            cf = c
-                            break
-                rows, summary, unit = _process_data(data, cf)
-                return {
-                    "title": ds_cfg["title"],
-                    "org_id": ds_cfg["org_id"], "tbl_id": ds_cfg["tbl_id"],
-                    "unit": unit, "rows": len(rows), "summary": summary,
-                    "chart_hint": {
-                        "chart_type": ds_cfg.get("chart_type", "line"),
-                        "x_field": "PRD_DE", "y_field": "DT", "color_field": cf,
-                    },
-                    "data": rows[:150],
-                }
-            except Exception as e:
-                return {"title": ds_cfg.get("title", ""), "error": str(e)}
-
-        fetched = await asyncio.gather(*[fetch_ds(ds) for ds in arguments["datasets"]])
-        return [types.TextContent(type="text", text=json.dumps({
-            "dashboard_title": arguments.get("dashboard_title", "KOSIS 통계 대시보드"),
-            "count": len([f for f in fetched if f]),
-            "datasets": [f for f in fetched if f],
-        }, ensure_ascii=False, indent=2))]
-
-    raise ValueError(f"Unknown tool: {name}")
+@mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
+async def oauth_resource(request: Request) -> Response:
+    return JSONResponse({"resource": _base_url(request)},
+                        headers={"Access-Control-Allow-Origin": "*"})
 
 
-session_manager = StreamableHTTPSessionManager(
-    app=mcp_server,
-    event_store=None,
-    json_response=False,
-    stateless=True,
-)
+@mcp.custom_route("/.well-known/oauth-protected-resource/sse", methods=["GET"])
+async def oauth_resource_sse(request: Request) -> Response:
+    return JSONResponse({"resource": _base_url(request)},
+                        headers={"Access-Control-Allow-Origin": "*"})
 
 
-class _McpApp:
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        request = Request(scope, receive)
-        api_key = request.query_params.get("kosis_key", "") or DEFAULT_API_KEY
-        token = _api_key_ctx.set(api_key)
-        try:
-            await session_manager.handle_request(scope, receive, send)
-        finally:
-            _api_key_ctx.reset(token)
+@mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
+async def oauth_auth_server(request: Request) -> Response:
+    return JSONResponse({"resource": _base_url(request)},
+                        headers={"Access-Control-Allow-Origin": "*"})
 
 
-_mcp_app = _McpApp()
-
-_MCP_PATHS = ("/mcp", "/sse")
-
-_OAUTH_PATHS = {
-    "/.well-known/oauth-protected-resource",
-    "/.well-known/oauth-protected-resource/sse",
-    "/.well-known/oauth-authorization-server",
-    "/register",
-}
+@mcp.custom_route("/register", methods=["GET", "POST"])
+async def register(request: Request) -> Response:
+    return JSONResponse({"status": "ok", "service": "kosis-mcp"},
+                        headers={"Access-Control-Allow-Origin": "*"})
 
 
-async def handle_health(request: Request) -> Response:
+@mcp.custom_route("/health", methods=["GET"])
+async def health(request: Request) -> Response:
     return JSONResponse({"status": "ok", "server": "kosis-mcp"})
 
 
-async def handle_index(request: Request) -> Response:
-    host = request.headers.get("host", "localhost")
-    scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
-    base_url = f"{scheme}://{host}"
-    mcp_url = f"{base_url}/mcp?kosis_key=YOUR_KEY"
+@mcp.custom_route("/", methods=["GET"])
+async def index(request: Request) -> Response:
+    base = _base_url(request)
+    mcp_url = f"{base}/mcp?kosis_key=YOUR_KEY"
     html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -385,7 +171,7 @@ a{{color:#2563eb}}
 function gen(){{
   var k=document.getElementById('k').value.trim();
   if(!k){{alert('인증키를 입력하세요');return;}}
-  var u='{base_url}/mcp?kosis_key='+k;
+  var u='{base}/mcp?kosis_key='+k;
   document.getElementById('url-out').innerHTML='<code style="margin-top:8px;background:#0f172a;color:#7dd3fc;padding:13px 16px;border-radius:9px;display:block;word-break:break-all">'+u+'</code>';
   document.getElementById('cfg').textContent=u;
 }}
@@ -395,49 +181,158 @@ function gen(){{
     return HTMLResponse(html)
 
 
-class _KosisMcpApp:
-    """Top-level ASGI router."""
+# ---------------------------------------------------------------------------
+# MCP 도구 등록
+# ---------------------------------------------------------------------------
+@mcp.tool()
+async def kosis_find_by_intent(query: str, max_results: int = 12) -> str:
+    """사용자의 연구/정책 의도를 자연어로 입력하면 관련 KOSIS 통계표를 자동으로 찾아줍니다."""
+    client = _get_client()
+    result = await client.search_by_intent(query=query, max_results=max_results)
+    return json.dumps(result, ensure_ascii=False, indent=2)
 
-    def __init__(self) -> None:
-        self._starlette = Starlette(
-            routes=[
-                Route("/", endpoint=handle_index),
-                Route("/health", endpoint=handle_health),
-            ]
-        )
-        self._starlette.add_middleware(
-            CORSMiddleware,
-            allow_origins=["*"],
-            allow_methods=["GET", "POST", "OPTIONS"],
-            allow_headers=["*"],
-        )
+
+@mcp.tool()
+async def kosis_analyze(
+    org_id: str,
+    tbl_id: str,
+    title: str,
+    chart_type: str = "line",
+    start_year: str = "",
+    end_year: str = "",
+    recent_n: int = 20,
+    prd_se: str = "Y",
+    color_field: str = "",
+) -> str:
+    """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다."""
+    client = _get_client()
+    data = await client.get_statistics_data(
+        org_id=org_id, tbl_id=tbl_id, prd_se=prd_se,
+        start_prd_de=start_year or None,
+        end_prd_de=end_year or None,
+        new_est_prd_cnt=recent_n,
+    )
+    if not data:
+        return "데이터가 없습니다."
+    cf = color_field or None
+    if not cf:
+        for c in ("ITM_NM", "C1_NM", "C2_NM"):
+            if c in set(data[0].keys()):
+                cf = c
+                break
+    rows, summary, unit = _process_data(data, cf)
+    return json.dumps({
+        "title": title, "org_id": org_id, "tbl_id": tbl_id,
+        "unit": unit, "rows": len(rows), "summary": summary,
+        "chart_hint": {"chart_type": chart_type, "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
+        "data": rows[:300],
+    }, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def kosis_browse(vw_cd: str = "MT_ZTITLE", parent_list_id: str = "A") -> str:
+    """KOSIS 카테고리 트리를 탐색합니다. vw_cd: MT_ZTITLE(주제별) MT_TM1_TITLE(대상별) MT_TM2_TITLE(이슈별)"""
+    client = _get_client()
+    result = await client.browse_categories(vw_cd=vw_cd, parent_list_id=parent_list_id)
+    tables = [{"org_id": r.get("ORG_ID"), "tbl_id": r.get("TBL_ID"),
+               "name": r.get("TBL_NM"), "updated": r.get("SEND_DE")}
+              for r in result if r.get("TBL_ID")]
+    cats = [{"list_id": r.get("LIST_ID"), "name": r.get("LIST_NM")}
+            for r in result if r.get("LIST_ID") and not r.get("TBL_ID")]
+    return json.dumps({"sub_categories": cats, "tables": tables[:30]}, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def kosis_explain(org_id: str, tbl_id: str) -> str:
+    """통계표의 조사 목적, 주기, 대상범위 등 메타데이터를 조회합니다."""
+    client = _get_client()
+    data = await client.get_statistics_explanation(org_id=org_id, tbl_id=tbl_id)
+    key_fields = {"TBL_NM", "STAT_NM", "CYCLE", "SURVEY_PURPOSE", "SURVEY_RANGE", "CONTACT_ORG"}
+    compact = [{k: v for k, v in row.items() if k in key_fields or not k.endswith("_CD")} for row in data]
+    return json.dumps(compact[:5], ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def kosis_dashboard(datasets: list, dashboard_title: str = "KOSIS 통계 대시보드") -> str:
+    """여러 통계표 데이터를 한꺼번에 조회해 반환합니다."""
+    client = _get_client()
+
+    async def fetch_ds(ds_cfg):
+        try:
+            data = await client.get_statistics_data(
+                org_id=ds_cfg["org_id"], tbl_id=ds_cfg["tbl_id"],
+                prd_se=ds_cfg.get("prd_se", "Y"),
+                start_prd_de=ds_cfg.get("start_year"),
+                end_prd_de=ds_cfg.get("end_year"),
+                new_est_prd_cnt=20,
+            )
+            if not data:
+                return None
+            cf = ds_cfg.get("color_field")
+            if not cf:
+                for c in ("ITM_NM", "C1_NM", "C2_NM"):
+                    if c in set(data[0].keys()):
+                        cf = c
+                        break
+            rows, summary, unit = _process_data(data, cf)
+            return {
+                "title": ds_cfg["title"], "org_id": ds_cfg["org_id"], "tbl_id": ds_cfg["tbl_id"],
+                "unit": unit, "rows": len(rows), "summary": summary,
+                "chart_hint": {"chart_type": ds_cfg.get("chart_type", "line"),
+                               "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
+                "data": rows[:150],
+            }
+        except Exception as e:
+            return {"title": ds_cfg.get("title", ""), "error": str(e)}
+
+    fetched = await asyncio.gather(*[fetch_ds(ds) for ds in datasets])
+    return json.dumps({
+        "dashboard_title": dashboard_title,
+        "count": len([f for f in fetched if f]),
+        "datasets": [f for f in fetched if f],
+    }, ensure_ascii=False, indent=2)
+
+
+# ---------------------------------------------------------------------------
+# ASGI 앱: FastMCP 앱에 API 키 미들웨어 씌우기
+# ---------------------------------------------------------------------------
+_fastmcp_app = mcp.streamable_http_app()
+_fastmcp_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+
+class _ApiKeyMiddleware:
+    """/mcp 와 /sse 요청에서 kosis_key 쿼리 파라미터를 contextvar에 주입."""
+
+    def __init__(self, app):
+        self._app = app
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self._starlette(scope, receive, send)
-            return
+        if scope["type"] == "http":
+            path = scope.get("path", "")
+            # /sse -> /mcp 리라이트 (하위 호환)
+            if path == "/sse":
+                scope = dict(scope)
+                scope["path"] = "/mcp"
+                scope["raw_path"] = b"/mcp"
 
-        path = scope.get("path", "")
-
-        if path in _MCP_PATHS:
-            await _mcp_app(scope, receive, send)
-            return
-
-        if path in _OAUTH_PATHS or path.startswith("/.well-known/"):
-            request = Request(scope, receive)
-            host = request.headers.get("host", "localhost")
-            scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
-            response = JSONResponse(
-                {"resource": f"{scheme}://{host}"},
-                headers={"Access-Control-Allow-Origin": "*"},
-            )
-            await response(scope, receive, send)
-            return
-
-        await self._starlette(scope, receive, send)
+            from starlette.requests import Request as Req
+            req = Req(scope)
+            api_key = req.query_params.get("kosis_key", "") or DEFAULT_API_KEY
+            token = _api_key_ctx.set(api_key)
+            try:
+                await self._app(scope, receive, send)
+            finally:
+                _api_key_ctx.reset(token)
+        else:
+            await self._app(scope, receive, send)
 
 
-app = _KosisMcpApp()
+app = _ApiKeyMiddleware(_fastmcp_app)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
