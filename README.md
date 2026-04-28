@@ -38,6 +38,10 @@ https://kosis-mcp-production.up.railway.app/mcp?kosis_key=발급받은_인증키
 > **서버 홈페이지**: https://kosis-mcp-production.up.railway.app  
 > 홈페이지에서 인증키를 입력하면 접속 URL이 자동 생성됩니다.
 
+> 💡 **사내 인터넷망 PC에서도 URL 방식으로 바로 연결 가능합니다.**  
+> 사내 SSL inspection 환경에서 Node.js(TypeScript) 기반 MCP는 자체 CA 번들 문제로 URL 연결이 실패하는 경우가 있습니다.  
+> 이 서버는 Python + Railway 배포 방식으로, 클라이언트(Claude 앱)가 OS 신뢰 저장소를 통해 Railway의 공인 인증서(Let's Encrypt)로 직접 연결하기 때문에 사내망에서도 별도 설정 없이 URL 방식이 동작합니다.
+
 ### 3단계 — Claude에게 말하기
 
 연결 후 Claude에게 바로 자연어로 요청하세요:
