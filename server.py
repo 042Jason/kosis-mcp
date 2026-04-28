@@ -217,12 +217,14 @@ async def kosis_analyze(
     prd_se: str = "Y",
     color_field: str = "",
     filter_keyword: str = "",
+    filter_and: str = "",
     breakdown: bool = False,
 ) -> str:
     """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.
     출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청, 2024년 기관명 변경됨).
     filter_keyword: 특정 항목만 필터링 (예: "자살", "서울", "50대"). 대용량 표에서 필요한 데이터만 추출.
     breakdown: False(기본)=집계 합계만 조회(셀 수 최소화), True=성별·연령별 등 전체 세분류 조회(셀 수 증가 주의).
+    [지역 필터 규칙] 지역 데이터 조회 시 "대전 서구"처럼 상위+하위 구조인 경우 filter_keyword="서구", filter_and="대전"으로 분리 호출하라. 동일 구·동명이 전국에 여러 개 있을 때 filter_and로 상위 지역명을 추가하면 C1_NM·C2_NM 교차 AND 매칭으로 정확히 특정된다.
     [출처 표시 — 필수, 예외 없음] 이 도구를 호출한 결과를 사용자에게 전달할 때는 출력 형식과 무관하게 항상 아래 규칙을 따르라.
     - 텍스트·요약·분석: 응답 마지막에 반드시 "출처: 국가데이터처 KOSIS 「{title}」 {url}" 형식으로 표시.
     - 표(table): 표 하단에 반드시 'citation' + 'url' 표시.
@@ -235,7 +237,7 @@ async def kosis_analyze(
         end_prd_de=end_year or None,
         new_est_prd_cnt=recent_n,
         breakdown=breakdown,
-        expand_c1=bool(filter_keyword),  # filter_keyword 지정 시 C1 차원 전체 펼침
+        expand_c1=bool(filter_keyword or filter_and),  # 필터 지정 시 C1 차원 전체 펼침
     )
     if not data:
         return "데이터가 없습니다."
@@ -246,12 +248,15 @@ async def kosis_analyze(
                 cf = c
                 break
     rows, summary, unit = _process_data(data, cf)
-    # filter_keyword가 있으면 C*_NM, ITM_NM에서 포함 여부로 필터링
+    # filter_keyword / filter_and 필터링 (AND 조건 지원 — 지역명 중복 해소용)
+    filter_cols = [k for k in (rows[0].keys() if rows else [])
+                   if k.endswith("_NM") or k == "ITM_NM"]
     if filter_keyword:
         kw = filter_keyword.lower()
-        filter_cols = [k for k in (rows[0].keys() if rows else [])
-                       if k.endswith("_NM") or k == "ITM_NM"]
         rows = [r for r in rows if any(kw in str(r.get(c, "")).lower() for c in filter_cols)]
+    if filter_and:
+        kw2 = filter_and.lower()
+        rows = [r for r in rows if any(kw2 in str(r.get(c, "")).lower() for c in filter_cols)]
     return json.dumps({
         "title": title, "org_id": org_id, "tbl_id": tbl_id,
         "unit": unit, "rows": len(rows), "summary": summary,
