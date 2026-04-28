@@ -312,24 +312,31 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 sse_transport = SseServerTransport("/messages/")
 
 
-async def _sse_asgi(scope: Scope, receive: Receive, send: Send) -> None:
-    """Raw ASGI handler -- same pattern as FastMCP."""
-    async with sse_transport.connect_sse(scope, receive, send) as streams:
-        await mcp_server.run(
-            streams[0], streams[1],
-            mcp_server.create_initialization_options(),
-        )
+class _SseApp:
+    """
+    Raw ASGI app for /sse.
 
+    Starlette의 Route + endpoint 방식은 endpoint가 반환한 Response 객체를
+    추가로 전송하려 해서 SSE transport가 이미 완료한 응답과 충돌합니다
+    (RuntimeError: Unexpected ASGI message 'http.response.start' sent,
+     after response already completed.).
 
-async def handle_sse(request: Request) -> Response:
-    """Starlette endpoint: set API key in contextvar, then run SSE."""
-    api_key = request.query_params.get("kosis_key", "") or DEFAULT_API_KEY
-    token = _api_key_ctx.set(api_key)
-    try:
-        await _sse_asgi(request.scope, request.receive, request._send)
-    finally:
-        _api_key_ctx.reset(token)
-    return Response()
+    이 클래스는 Starlette 라우팅을 우회해 raw ASGI send/receive를 직접
+    다루므로 이중 응답 문제가 발생하지 않습니다.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        request = Request(scope, receive)
+        api_key = request.query_params.get("kosis_key", "") or DEFAULT_API_KEY
+        token = _api_key_ctx.set(api_key)
+        try:
+            async with sse_transport.connect_sse(scope, receive, send) as streams:
+                await mcp_server.run(
+                    streams[0], streams[1],
+                    mcp_server.create_initialization_options(),
+                )
+        finally:
+            _api_key_ctx.reset(token)
 
 
 async def handle_health(request: Request) -> Response:
@@ -395,22 +402,36 @@ function gen(){{
     return HTMLResponse(html)
 
 
-# -- Starlette app --------------------------------------------------------------
-starlette_app = Starlette(
+# -- Starlette app (non-SSE routes) --------------------------------------------
+_sse_app = _SseApp()
+
+_starlette_app = Starlette(
     routes=[
         Route("/", endpoint=handle_index),
         Route("/health", endpoint=handle_health),
-        Route("/sse", endpoint=handle_sse, methods=["GET"]),
         Mount("/messages/", app=sse_transport.handle_post_message),
     ]
 )
 
-starlette_app.add_middleware(
+_starlette_app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+
+class _KosisMcpApp:
+    """/sse → raw SSE ASGI 앱, 나머지 → Starlette 앱으로 분기."""
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and scope.get("path") == "/sse":
+            await _sse_app(scope, receive, send)
+        else:
+            await _starlette_app(scope, receive, send)
+
+
+starlette_app = _KosisMcpApp()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
