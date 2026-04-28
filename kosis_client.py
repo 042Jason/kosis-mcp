@@ -474,4 +474,8 @@ class KosisClient:
                         merged.append(item)
         merged = merged[:max_results]
         return {
-            "query
+            "query": query,
+            "intents": [i["intent"] for i in intents],
+            "count": len(merged),
+            "tables": merged,
+        }
