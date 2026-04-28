@@ -225,6 +225,9 @@ class KosisClient:
                 resp.raise_for_status()
                 data = resp.json()
                 if isinstance(data, dict) and "err" in data:
+                    # err 30 = 조회결과 없음 → 빈 배열로 처리 (에러 아님)
+                    if data.get("err") == "30":
+                        return []
                     raise ValueError(f"KOSIS API error: {data}")
                 return data if isinstance(data, list) else []
             except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
@@ -299,11 +302,11 @@ class KosisClient:
         # ── objL error: fetch actual item codes and retry ────────────────────
         if isinstance(data, dict) and data.get("err") == "20":
             items = await self._get_item_codes(org_id, tbl_id)
+            dim_order: list[str] = []
+            dim_items: dict[str, list[str]] = {}
             if items:
                 # Group ITMC_IDs by OBJ_ID (dimension).
                 # objL1/objL2/... must be item codes (ITMC_ID), not dimension codes (OBJ_ID).
-                dim_order: list[str] = []
-                dim_items: dict[str, list[str]] = {}
                 for it in items:
                     obj_id = it.get("OBJ_ID", "")
                     itmc_id = it.get("ITMC_ID", "")
@@ -341,32 +344,32 @@ class KosisClient:
                     resp3.raise_for_status()
                     data = resp3.json()
 
-                # 최종 폴백: 표준 statisticsData.do (매뉴얼 공식 엔드포인트)
-                # objL1=첫번째 dim 코드, itmId=ALL 로 시도
-                if isinstance(data, dict) and data.get("err") == "20" and dim_order:
-                    std_params = {
-                        "method": "getList",
-                        "apiKey": self.api_key,
-                        "orgId": org_id,
-                        "tblId": tbl_id,
-                        "objL1": dim_order[0],
-                        "itmId": "ALL",
-                        "prdSe": prd_se,
-                        "format": "json",
-                        "jsonVD": "Y",
-                        "errMsg": "Y",
-                    }
-                    if start_prd_de:
-                        std_params["startPrdDe"] = start_prd_de
-                    if end_prd_de:
-                        std_params["endPrdDe"] = end_prd_de
-                    if new_est_prd_cnt and not start_prd_de:
-                        std_params["newEstPrdCnt"] = str(new_est_prd_cnt)
-                    resp4 = await self._client.get(
-                        f"{BASE_URL}/statisticsData.do", params=std_params
-                    )
-                    resp4.raise_for_status()
-                    data = resp4.json()
+            # 최종 폴백: 표준 statisticsData.do (매뉴얼 공식 엔드포인트)
+            # items 여부 무관하게 err 20 지속 시 시도
+            if isinstance(data, dict) and data.get("err") == "20":
+                std_params = {
+                    "method": "getList",
+                    "apiKey": self.api_key,
+                    "orgId": org_id,
+                    "tblId": tbl_id,
+                    "objL1": dim_order[0] if dim_order else "ALL",
+                    "itmId": "ALL",
+                    "prdSe": prd_se,
+                    "format": "json",
+                    "jsonVD": "Y",
+                    "errMsg": "Y",
+                }
+                if start_prd_de:
+                    std_params["startPrdDe"] = start_prd_de
+                if end_prd_de:
+                    std_params["endPrdDe"] = end_prd_de
+                if new_est_prd_cnt and not start_prd_de:
+                    std_params["newEstPrdCnt"] = str(new_est_prd_cnt)
+                resp4 = await self._client.get(
+                    f"{BASE_URL}/statisticsData.do", params=std_params
+                )
+                resp4.raise_for_status()
+                data = resp4.json()
 
         if isinstance(data, dict) and "err" in data:
             raise ValueError(f"KOSIS API error: {data}  request_id: {data.get('request_id', '')}")
