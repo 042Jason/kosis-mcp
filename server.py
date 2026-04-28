@@ -205,8 +205,11 @@ async def kosis_analyze(
     recent_n: int = 20,
     prd_se: str = "Y",
     color_field: str = "",
+    filter_keyword: str = "",
 ) -> str:
-    """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다. 출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청, 2024년 기관명 변경됨)."""
+    """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.
+    출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청, 2024년 기관명 변경됨).
+    filter_keyword: 특정 항목만 필터링 (예: "자살", "서울", "50대"). 대용량 표에서 필요한 데이터만 추출."""
     client = _get_client()
     data = await client.get_statistics_data(
         org_id=org_id, tbl_id=tbl_id, prd_se=prd_se,
@@ -223,12 +226,18 @@ async def kosis_analyze(
                 cf = c
                 break
     rows, summary, unit = _process_data(data, cf)
+    # filter_keyword가 있으면 C*_NM, ITM_NM에서 포함 여부로 필터링
+    if filter_keyword:
+        kw = filter_keyword.lower()
+        filter_cols = [k for k in (rows[0].keys() if rows else [])
+                       if k.endswith("_NM") or k == "ITM_NM"]
+        rows = [r for r in rows if any(kw in str(r.get(c, "")).lower() for c in filter_cols)]
     return json.dumps({
         "title": title, "org_id": org_id, "tbl_id": tbl_id,
         "unit": unit, "rows": len(rows), "summary": summary,
-        "source": "국가데이터처 KOSIS",  # 항상 '국가데이터처'로 표기 (구 통계청, 2024년 기관명 변경)
+        "source": "국가데이터처 KOSIS",
         "chart_hint": {"chart_type": chart_type, "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
-        "sample": rows[:5],
+        "data": rows[:100],  # 필터링 후 최대 100행 (5행→100행 복원)
     }, ensure_ascii=False, indent=2)
 
 
