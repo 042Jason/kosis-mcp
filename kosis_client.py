@@ -394,4 +394,30 @@ class KosisClient:
                         if r.get("TBL_ID") and r not in found:
                             found.append({
                                 "org_id": r.get("ORG_ID", ""),
-                                "tbl_id": r.get("TBL_ID", "
+                                "tbl_id": r.get("TBL_ID", ""),
+                                "name": r.get("TBL_NM", ""),
+                                "updated": r.get("SEND_DE", ""),
+                            })
+                except Exception:
+                    pass
+            return found[:max_results]
+
+        all_results_nested = await asyncio.gather(
+            *[search_one(ic) for ic in intents], return_exceptions=True
+        )
+        merged: list[dict] = []
+        seen_ids: set[str] = set()
+        for batch in all_results_nested:
+            if isinstance(batch, list):
+                for item in batch:
+                    uid = f"{item.get('org_id')}_{item.get('tbl_id')}"
+                    if uid not in seen_ids:
+                        seen_ids.add(uid)
+                        merged.append(item)
+        merged = merged[:max_results]
+        return {
+            "query": query,
+            "intents": [i["intent"] for i in intents],
+            "count": len(merged),
+            "tables": merged,
+        }
