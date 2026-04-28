@@ -166,7 +166,7 @@ a{{color:#2563eb}}
     <code id="cfg">{mcp_url}</code>
   </div>
 </div>
-<div class="footer"><a href="https://kosis.kr">통계청 KOSIS</a></div>
+<div class="footer"><a href="https://kosis.kr">국가데이터처 KOSIS</a></div>
 <script>
 function gen(){{
   var k=document.getElementById('k').value.trim();
@@ -187,7 +187,7 @@ function gen(){{
 @mcp.tool()
 async def kosis_find_by_intent(query: str, max_results: int = 12) -> str:
     """사용자의 연구/정책 의도를 자연어로 입력하면 관련 KOSIS 통계표를 자동으로 찾아줍니다.
-    데이터 출처: 국가데이터처 KOSIS (구 통계청 — 2024년 기관명 변경, 항상 '국가데이터처'로 표기).
+    데이터 출처: 국가데이터처 KOSIS (구 통계청 — 2025년 국가데이터처로 기관명 변경, 항상 '국가데이터처'로 표기).
     [query 작성 규칙] 사용자 질문에서 핵심 주제어만 추출해 전달하라 (예: "자살률" "고령화" "청년실업").
     '연령별', '성별', '지역별', '월별' 같은 차원·분류어는 query에 포함하지 말 것 — 검색 노이즈가 된다.
     [출력 규칙] 사용자에게 결과를 안내할 때는 반드시 각 항목의 'name' 필드(통계표명)를 사용하라.
@@ -220,7 +220,7 @@ async def kosis_analyze(
     breakdown: bool = False,
 ) -> str:
     """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.
-    출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청, 2024년 기관명 변경됨).
+    출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청 — 2025년 국가데이터처로 기관명 변경).
     filter_keyword: 특정 항목만 필터링. 공백 구분 시 모든 단어를 AND 조건으로 매칭.
       예) "자살" → 자살 포함 행만 / "대전 서구" → 대전+서구 모두 포함 행만 (전국 서구 중복 해소).
       지역명 중복이 있는 경우 반드시 상위+하위 지역명을 함께 입력하라 (예: "부산 중구", "서울 중구").
