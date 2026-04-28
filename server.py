@@ -191,10 +191,17 @@ async def kosis_find_by_intent(query: str, max_results: int = 12) -> str:
     [query 작성 규칙] 사용자 질문에서 핵심 주제어만 추출해 전달하라 (예: "자살률" "고령화" "청년실업").
     '연령별', '성별', '지역별', '월별' 같은 차원·분류어는 query에 포함하지 말 것 — 검색 노이즈가 된다.
     [출력 규칙] 사용자에게 결과를 안내할 때는 반드시 각 항목의 'name' 필드(통계표명)를 사용하라.
-    'tbl_id'(예: DT_1B34E01) 같은 내부 식별자는 사용자에게 노출하지 말 것 — kosis_analyze 호출 시에만 내부적으로 사용."""
+    'tbl_id'(예: DT_1B34E01) 같은 내부 식별자는 사용자에게 노출하지 말 것 — kosis_analyze 호출 시에만 내부적으로 사용.
+    [URL 표시 규칙] 사용자에게 결과를 안내할 때 각 항목의 'url' 필드를 함께 표시하라 — 사용자가 KOSIS에서 직접 확인할 수 있도록."""
     client = _get_client()
     result = await client.search_by_intent(query=query, max_results=max_results)
     result["source"] = "국가데이터처 KOSIS"
+    # 각 결과 항목에 KOSIS 직접 접근 URL 추가
+    for item in result.get("tables", []):
+        oid = item.get("org_id", "")
+        tid = item.get("tbl_id", "")
+        if oid and tid:
+            item["url"] = f"https://kosis.kr/statHtml/statHtml.do?orgId={oid}&tblId={tid}"
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
@@ -217,7 +224,9 @@ async def kosis_analyze(
     filter_keyword: 특정 항목만 필터링 (예: "자살", "서울", "50대"). 대용량 표에서 필요한 데이터만 추출.
     breakdown: False(기본)=집계 합계만 조회(셀 수 최소화), True=성별·연령별 등 전체 세분류 조회(셀 수 증가 주의).
     [출력 규칙] 사용자에게 데이터 출처를 안내할 때는 'title' 파라미터로 전달한 통계표명을 사용하라. org_id·tbl_id 같은 내부 식별자는 사용자에게 노출하지 말 것.
-    [시각화 규칙] 차트·대시보드를 생성할 때는 반드시 응답의 'citation' 필드 값을 차트 하단(footer)에 표시하라. 예: "출처: 국가데이터처 KOSIS 「월별 자살 사망자 수」". 여러 표를 사용한 경우 각 차트마다 해당 citation을 개별 표시할 것."""
+    [URL 표시 규칙] 데이터를 텍스트·표로 제시할 때는 'url' 필드의 KOSIS 링크를 출처와 함께 표시하라. 단, 차트·대시보드·시각화에는 넣지 말 것.
+    [표 출력 규칙] 데이터를 표(table)로 보여줄 때는 표 하단에 반드시 'citation' 필드 값을 출처로 표시하라.
+    [시각화 규칙] 차트·대시보드를 생성할 때는 반드시 'citation' 필드 값을 차트 하단(footer)에 표시하라. 여러 표를 사용한 경우 각 차트마다 해당 citation을 개별 표시할 것."""
     client = _get_client()
     data = await client.get_statistics_data(
         org_id=org_id, tbl_id=tbl_id, prd_se=prd_se,
@@ -247,6 +256,7 @@ async def kosis_analyze(
         "unit": unit, "rows": len(rows), "summary": summary,
         "source": "국가데이터처 KOSIS",
         "citation": f"출처: 국가데이터처 KOSIS 「{title}」",
+        "url": f"https://kosis.kr/statHtml/statHtml.do?orgId={org_id}&tblId={tbl_id}",
         "chart_hint": {"chart_type": chart_type, "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
         "data": rows[:100],
     }, ensure_ascii=False, indent=2)
