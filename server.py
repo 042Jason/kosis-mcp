@@ -203,11 +203,24 @@ async def kosis_find_by_intent(query: str, max_results: int = 12) -> str:
     client = _get_client()
     result = await client.search_by_intent(query=query, max_results=max_results)
     result["source"] = "국가데이터처 KOSIS"
+    _period_re = re.compile(r'[(\s](\d{4})[–\-~](\d{4})?')
     for item in result.get("tables", []):
         oid = item.get("org_id", "")
         tid = item.get("tbl_id", "")
         if oid and tid:
             item["url"] = f"https://kosis.kr/statHtml/statHtml.do?orgId={oid}&tblId={tid}"
+        # 표 이름에서 수록기간 힌트 파싱 — Claude가 기간별 표 선택에 활용
+        name = item.get("name", "")
+        m = _period_re.search(name)
+        if m:
+            item["period_hint"] = f"{m.group(1)}~{m.group(2) or ''}"
+    # 동일 기관에서 period_hint가 여러 개면 split 시리즈 알림
+    period_items = [t for t in result.get("tables", []) if t.get("period_hint")]
+    if len(period_items) >= 2:
+        result["split_series_note"] = (
+            "동일 통계가 기간별로 분리된 표로 구성됩니다. "
+            "연속 시계열 필요 시 kosis_analyze의 extra_tbl_ids에 이전 기간 표 ID를 전달하세요."
+        )
     return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
 
 
@@ -286,6 +299,38 @@ async def kosis_analyze(
         merged_raw.sort(key=lambda r: r.get("PRD_DE", ""))
     else:
         merged_raw = primary_data
+
+    # ── auto-fallback: 데이터가 없고 기간이 지정됐을 때 동일 기관 관련 표 자동 탐색 ──
+    if not merged_raw and (start_year or end_year) and not extra_ids:
+        kw_tokens = [t for t in title.split() if len(t) >= 2][:2]
+        search_kw = kw_tokens[0] if kw_tokens else title[:8]
+        try:
+            search_results = await client.search_statistics(keyword=search_kw)
+            candidates = [
+                r["TBL_ID"] for r in search_results
+                if r.get("ORG_ID") == org_id
+                and r.get("TBL_ID")
+                and r.get("TBL_ID") != tbl_id
+            ][:4]
+        except Exception:
+            candidates = []
+
+        if candidates:
+            cand_results = await asyncio.gather(*[_fetch(org_id, cid) for cid in candidates])
+            auto_rows: list[dict] = []
+            auto_used: list[str] = []
+            seen_auto: set[str] = set()
+            for cid, cdata in zip(candidates, cand_results):
+                for row in (cdata or []):
+                    key = f"{row.get('PRD_DE','')}__{row.get('ITM_NM','')}__{row.get('C1_NM','')}"
+                    if key not in seen_auto:
+                        auto_rows.append(row)
+                        seen_auto.add(key)
+                if cdata:
+                    auto_used.append(cid)
+            if auto_rows:
+                merged_raw = sorted(auto_rows, key=lambda r: r.get("PRD_DE", ""))
+                extra_ids = auto_used  # merged_tables 기록용
 
     if not merged_raw:
         return "데이터가 없습니다."
