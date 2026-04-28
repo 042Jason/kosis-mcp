@@ -30,7 +30,8 @@ def _get_client() -> KosisClient:
     return KosisClient(key)
 
 
-_KEEP_FIELDS = {"PRD_DE", "DT", "ITM_NM", "C1_NM", "C2_NM", "C3_NM", "UNIT_NM"}
+_KEEP_FIELDS = {"PRD_DE", "DT", "ITM_NM", "C1_NM", "C2_NM", "C3_NM"}
+# UNIT_NM은 최상위 unit 필드로 반환 — 각 행 중복 포함 제거로 페이로드 절감
 
 
 def _process_data(data: list, color_field=None):
@@ -195,17 +196,18 @@ async def kosis_find_by_intent(query: str, max_results: int = 12) -> str:
     '연령별', '성별', '지역별', '월별' 같은 차원·분류어는 query에 포함하지 말 것 — 검색 노이즈가 된다.
     [출력 규칙] 사용자에게 결과를 안내할 때는 반드시 각 항목의 'name' 필드(통계표명)를 사용하라.
     'tbl_id'(예: DT_1B34E01) 같은 내부 식별자는 사용자에게 노출하지 말 것 — kosis_analyze 호출 시에만 내부적으로 사용.
-    [URL 표시 규칙] 사용자에게 결과를 안내할 때 각 항목의 'url' 필드를 함께 표시하라 — 사용자가 KOSIS에서 직접 확인할 수 있도록."""
+    [URL 표시 규칙] 사용자에게 결과를 안내할 때 각 항목의 'url' 필드를 함께 표시하라 — 사용자가 KOSIS에서 직접 확인할 수 있도록.
+    [재검색 금지] 이 도구는 1회 호출로 충분하다. 반환된 결과에 관련 표가 있으면 즉시 kosis_analyze를 호출하라.
+    결과가 마음에 들지 않더라도 동일 의도로 재검색하지 말 것 — 다른 키워드로 추가 검색은 1회까지만 허용."""
     client = _get_client()
     result = await client.search_by_intent(query=query, max_results=max_results)
     result["source"] = "국가데이터처 KOSIS"
-    # 각 결과 항목에 KOSIS 직접 접근 URL 추가
     for item in result.get("tables", []):
         oid = item.get("org_id", "")
         tid = item.get("tbl_id", "")
         if oid and tid:
             item["url"] = f"https://kosis.kr/statHtml/statHtml.do?orgId={oid}&tblId={tid}"
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
 
 
 @mcp.tool()
@@ -216,7 +218,7 @@ async def kosis_analyze(
     chart_type: str = "line",
     start_year: str = "",
     end_year: str = "",
-    recent_n: int = 20,
+    recent_n: int = 10,
     prd_se: str = "Y",
     color_field: str = "",
     filter_keyword: str = "",
@@ -265,8 +267,8 @@ async def kosis_analyze(
         "citation": f"출처: 국가데이터처 KOSIS 「{title}」",
         "url": f"https://kosis.kr/statHtml/statHtml.do?orgId={org_id}&tblId={tbl_id}",
         "chart_hint": {"chart_type": chart_type, "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
-        "data": rows[:100],
-    }, ensure_ascii=False, indent=2)
+        "data": rows[:60],
+    }, ensure_ascii=False, separators=(',', ':'))
 
 
 @mcp.tool()
@@ -279,7 +281,7 @@ async def kosis_browse(vw_cd: str = "MT_ZTITLE", parent_list_id: str = "A") -> s
               for r in result if r.get("TBL_ID")]
     cats = [{"list_id": r.get("LIST_ID"), "name": r.get("LIST_NM")}
             for r in result if r.get("LIST_ID") and not r.get("TBL_ID")]
-    return json.dumps({"sub_categories": cats, "tables": tables[:30]}, ensure_ascii=False, indent=2)
+    return json.dumps({"sub_categories": cats, "tables": tables[:30]}, ensure_ascii=False, separators=(',', ':'))
 
 
 @mcp.tool()
@@ -289,7 +291,7 @@ async def kosis_explain(org_id: str, tbl_id: str) -> str:
     data = await client.get_statistics_explanation(org_id=org_id, tbl_id=tbl_id)
     key_fields = {"TBL_NM", "STAT_NM", "CYCLE", "SURVEY_PURPOSE", "SURVEY_RANGE", "CONTACT_ORG"}
     compact = [{k: v for k, v in row.items() if k in key_fields or not k.endswith("_CD")} for row in data]
-    return json.dumps(compact[:5], ensure_ascii=False, indent=2)
+    return json.dumps(compact[:5], ensure_ascii=False, separators=(',', ':'))
 
 
 @mcp.tool()
@@ -304,7 +306,7 @@ async def kosis_dashboard(datasets: list, dashboard_title: str = "KOSIS 통계 �
                 prd_se=ds_cfg.get("prd_se", "Y"),
                 start_prd_de=ds_cfg.get("start_year"),
                 end_prd_de=ds_cfg.get("end_year"),
-                new_est_prd_cnt=20,
+                new_est_prd_cnt=10,
             )
             if not data:
                 return None
@@ -315,12 +317,15 @@ async def kosis_dashboard(datasets: list, dashboard_title: str = "KOSIS 통계 �
                         cf = c
                         break
             rows, summary, unit = _process_data(data, cf)
+            oid, tid = ds_cfg["org_id"], ds_cfg["tbl_id"]
             return {
-                "title": ds_cfg["title"], "org_id": ds_cfg["org_id"], "tbl_id": ds_cfg["tbl_id"],
+                "title": ds_cfg["title"],
                 "unit": unit, "rows": len(rows), "summary": summary,
+                "citation": f"출처: 국가데이터처 KOSIS 「{ds_cfg['title']}」",
                 "chart_hint": {"chart_type": ds_cfg.get("chart_type", "line"),
                                "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
-                "sample": rows[:5],
+                # sample 25행: kosis_analyze 추가 호출 없이 차트 생성 가능한 최소 데이터
+                "data": rows[:25],
             }
         except Exception as e:
             return {"title": ds_cfg.get("title", ""), "error": str(e)}
@@ -330,7 +335,7 @@ async def kosis_dashboard(datasets: list, dashboard_title: str = "KOSIS 통계 �
         "dashboard_title": dashboard_title,
         "count": len([f for f in fetched if f]),
         "datasets": [f for f in fetched if f],
-    }, ensure_ascii=False, indent=2)
+    }, ensure_ascii=False, separators=(',', ':'))
 
 
 # ---------------------------------------------------------------------------
@@ -360,20 +365,4 @@ class _ApiKeyMiddleware:
                 scope["path"] = "/mcp"
                 scope["raw_path"] = b"/mcp"
 
-            from starlette.requests import Request as Req
-            req = Req(scope)
-            api_key = req.query_params.get("kosis_key", "") or DEFAULT_API_KEY
-            token = _api_key_ctx.set(api_key)
-            try:
-                await self._app(scope, receive, send)
-            finally:
-                _api_key_ctx.reset(token)
-        else:
-            await self._app(scope, receive, send)
-
-
-starlette_app = _ApiKeyMiddleware(_fastmcp_app)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port, log_level="info")
+            from st
