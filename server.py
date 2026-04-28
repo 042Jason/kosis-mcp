@@ -1,7 +1,7 @@
 """
-KOSIS MCP 서버 -- SSE transport (mcp 1.x / Starlette 1.x 호환)
+KOSIS MCP 서버 -- Streamable HTTP transport (MCP 2025-03-26 spec)
 
-접속 URL: https://your-server.com/sse?kosis_key=발급받은_인증키
+접속 URL: https://your-server.com/mcp?kosis_key=발급받은_인증키
 """
 
 import asyncio
@@ -12,7 +12,7 @@ import os
 import pandas as pd
 import uvicorn
 from mcp.server import Server
-from mcp.server.sse import SseServerTransport
+from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp import types
 from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
@@ -308,21 +308,22 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     raise ValueError(f"Unknown tool: {name}")
 
 
-# -- SSE transport --------------------------------------------------------------
-sse_transport = SseServerTransport("/messages/")
+# -- Streamable HTTP transport --------------------------------------------------
+session_manager = StreamableHTTPSessionManager(
+    app=mcp_server,
+    event_store=None,
+    json_response=False,
+    stateless=True,
+)
 
 
-class _SseApp:
+class _McpApp:
     """
-    Raw ASGI app for /sse.
+    /mcp 와 /sse 양쪽에서 요청을 받아 API 키를 contextvar에 설정한 뒤
+    StreamableHTTPSessionManager에 위임합니다.
 
-    Starlette의 Route + endpoint 방식은 endpoint가 반환한 Response 객체를
-    추가로 전송하려 해서 SSE transport가 이미 완료한 응답과 충돌합니다
-    (RuntimeError: Unexpected ASGI message 'http.response.start' sent,
-     after response already completed.).
-
-    이 클래스는 Starlette 라우팅을 우회해 raw ASGI send/receive를 직접
-    다루므로 이중 응답 문제가 발생하지 않습니다.
+    - GET  /mcp?kosis_key=... → SSE 스트림 (이벤트 수신)
+    - POST /mcp?kosis_key=... → JSON 메시지 (도구 호출 등)
     """
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -330,15 +331,15 @@ class _SseApp:
         api_key = request.query_params.get("kosis_key", "") or DEFAULT_API_KEY
         token = _api_key_ctx.set(api_key)
         try:
-            async with sse_transport.connect_sse(scope, receive, send) as streams:
-                await mcp_server.run(
-                    streams[0], streams[1],
-                    mcp_server.create_initialization_options(),
-                )
+            await session_manager.handle_request(scope, receive, send)
         finally:
             _api_key_ctx.reset(token)
 
 
+_mcp_app = _McpApp()
+
+
+# -- 일반 페이지 핸들러 ----------------------------------------------------------
 async def handle_health(request: Request) -> Response:
     return JSONResponse({"status": "ok", "server": "kosis-mcp"})
 
@@ -347,6 +348,7 @@ async def handle_index(request: Request) -> Response:
     host = request.headers.get("host", "localhost")
     scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
     base_url = f"{scheme}://{host}"
+    mcp_url = f"{base_url}/mcp?kosis_key=YOUR_KEY"
     html = f"""<!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -384,7 +386,7 @@ a{{color:#2563eb}}
   <div class="card">
     <h2>Claude 연결 방법</h2>
     <p style="font-size:.92rem;color:#475569;margin-bottom:12px">Claude 앱 → Settings → Integrations → Add custom integration</p>
-    <code id="cfg">{base_url}/sse?kosis_key=YOUR_KEY</code>
+    <code id="cfg">{mcp_url}</code>
   </div>
 </div>
 <div class="footer"><a href="https://kosis.kr">통계청 KOSIS</a></div>
@@ -392,7 +394,7 @@ a{{color:#2563eb}}
 function gen(){{
   const k=document.getElementById('k').value.trim();
   if(!k)return alert('인증키를 입력하세요');
-  const u=`{base_url}/sse?kosis_key=${{k}}`;
+  const u=`{base_url}/mcp?kosis_key=${{k}}`;
   document.getElementById('url-out').innerHTML='<code style="margin-top:8px;background:#0f172a;color:#7dd3fc;padding:13px 16px;border-radius:9px;display:block;word-break:break-all">'+u+'</code>';
   document.getElementById('cfg').textContent=u;
 }}
@@ -402,38 +404,40 @@ function gen(){{
     return HTMLResponse(html)
 
 
-# -- Starlette app (non-SSE routes) --------------------------------------------
-_sse_app = _SseApp()
-
-_starlette_app = Starlette(
-    routes=[
-        Route("/", endpoint=handle_index),
-        Route("/health", endpoint=handle_health),
-        Mount("/messages/", app=sse_transport.handle_post_message),
-    ]
-)
-
-_starlette_app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST", "OPTIONS"],
-    allow_headers=["*"],
-)
-
-
+# -- 전체 ASGI 앱 ---------------------------------------------------------------
 class _KosisMcpApp:
-    """/sse → raw SSE ASGI 앱, 나머지 → Starlette 앱으로 분기."""
+    """
+    /mcp, /sse → StreamableHTTP MCP 핸들러
+    /          → 홈페이지
+    /health    → 헬스체크
+    그 외      → 404
+    """
+
+    def __init__(self) -> None:
+        self._starlette = Starlette(
+            routes=[
+                Route("/", endpoint=handle_index),
+                Route("/health", endpoint=handle_health),
+            ]
+        )
+        self._starlette.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["GET", "POST", "OPTIONS"],
+            allow_headers=["*"],
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] == "http" and scope.get("path") == "/sse":
-            await _sse_app(scope, receive, send)
+        path = scope.get("path", "")
+        if scope["type"] == "http" and path in ("/mcp", "/sse"):
+            await _mcp_app(scope, receive, send)
         else:
-            await _starlette_app(scope, receive, send)
+            await self._starlette(scope, receive, send)
 
 
-starlette_app = _KosisMcpApp()
+app = _KosisMcpApp()
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
