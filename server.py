@@ -186,9 +186,11 @@ function gen(){{
 # ---------------------------------------------------------------------------
 @mcp.tool()
 async def kosis_find_by_intent(query: str, max_results: int = 12) -> str:
-    """사용자의 연구/정책 의도를 자연어로 입력하면 관련 KOSIS 통계표를 자동으로 찾아줍니다."""
+    """사용자의 연구/정책 의도를 자연어로 입력하면 관련 KOSIS 통계표를 자동으로 찾아줍니다.
+    데이터 출처: 국가데이터처 KOSIS (구 통계청 — 2024년 기관명 변경, 항상 '국가데이터처'로 표기)"""
     client = _get_client()
     result = await client.search_by_intent(query=query, max_results=max_results)
+    result["source"] = "국가데이터처 KOSIS"
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
@@ -204,7 +206,7 @@ async def kosis_analyze(
     prd_se: str = "Y",
     color_field: str = "",
 ) -> str:
-    """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다."""
+    """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다. 출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청, 2024년 기관명 변경됨)."""
     client = _get_client()
     data = await client.get_statistics_data(
         org_id=org_id, tbl_id=tbl_id, prd_se=prd_se,
@@ -224,8 +226,9 @@ async def kosis_analyze(
     return json.dumps({
         "title": title, "org_id": org_id, "tbl_id": tbl_id,
         "unit": unit, "rows": len(rows), "summary": summary,
+        "source": "국가데이터처 KOSIS",  # 항상 '국가데이터처'로 표기 (구 통계청, 2024년 기관명 변경)
         "chart_hint": {"chart_type": chart_type, "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
-        "sample": rows[:5],  # 구조 파악용 샘플만 (전체 raw data 제거 → 토큰 절감)
+        "sample": rows[:5],
     }, ensure_ascii=False, indent=2)
 
 
