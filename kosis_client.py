@@ -35,7 +35,8 @@ INTENT_MAP: dict[str, dict] = {
     "노인": {
         "vw_cd": "MT_TM1_TITLE",
         "keywords": ["노인", "고령자", "고령인구", "노인복지"],
-        "topic_keywords": ["노인", "고령", "65세", "노년", "치매", "요양"],
+        "topic_keywords": ["노인", "고령자", "고령인구", "65세", "노년", "치매", "요양"],
+        # "고령" 제거 — "고령화" 쿼리에서 노인 인텐트 오발동 유발 (고령화 전용 인텐트가 따로 있음)
     },
     "여성": {
         "vw_cd": "MT_TM1_TITLE",
@@ -45,7 +46,8 @@ INTENT_MAP: dict[str, dict] = {
     "장애인": {
         "vw_cd": "MT_TM1_TITLE",
         "keywords": ["장애인", "장애", "장애등급"],
-        "topic_keywords": ["장애인", "장애", "복지", "재활"],
+        "topic_keywords": ["장애인", "장애등록", "장애급여", "재활"],
+        # "복지" 제거 — "복지서비스" 등 일반 복지 쿼리에서 장애인 인텐트 오발동 유발
     },
     "다문화": {
         "vw_cd": "MT_TM1_TITLE",
@@ -150,13 +152,13 @@ INTENT_MAP: dict[str, dict] = {
         "vw_cd": "MT_OTITLE",
         "keywords": ["통계청", "국가데이터처", "국토교통부", "보건복지부", "교육부",
                      "고용노동부", "행정안전부", "농림축산식품부", "산업통상자원부"],
-        "topic_keywords": ["기관", "부처", "청", "원", "공단", "공사"],
+        "topic_keywords": ["기관별통계", "부처통계", "공단통계", "공사통계"],
+        # "청", "원" 제거 — 1글자라 "청년", "원인" 등에 substring 오매칭
     },
 }
 
 # 출력 텍스트 정규화 — Claude에게 반환하는 데이터에서만 구명칭을 신명칭으로 치환
-# 검색 API 호출에는 적용하지 않음 (KOSIS 색인은 여전히 구명칭 "통계청" 사용)
-# ※ 2025년 조직 개편으로 "통계청" → "국가데이터처" 변경
+# 검색 API 호출에는 적용하지 않음 (KOSIS는 여전히 구명칭 색인)
 _OUTPUT_ALIAS: dict[str, str] = {
     "통계청": "국가데이터처",
 }
@@ -190,9 +192,21 @@ _FALLBACK_VW_CDS = ["MT_ZTITLE", "MT_TM1_TITLE", "MT_TM2_TITLE"]
 def detect_intent(query: str) -> list[dict]:
     matched = []
     query_lower = query.lower()
+    query_tokens = set(query_lower.split())  # 공백 기준 토큰 집합
+
+    def _kw_matches(kw: str) -> bool:
+        """
+        키워드 매칭 규칙:
+        - 3글자 이상: substring 허용 (ex. "청년" in "청년실업률")
+        - 2글자 이하: 토큰 완전일치만 허용 (ex. "청"은 "청년" substring 매칭 차단)
+        """
+        if len(kw) <= 2:
+            return kw in query_tokens
+        return kw in query_lower
+
     for intent_key, config in INTENT_MAP.items():
         all_kws = [intent_key] + config.get("keywords", []) + config.get("topic_keywords", [])
-        if any(kw in query_lower for kw in all_kws):
+        if any(_kw_matches(kw) for kw in all_kws):
             matched.append({
                 "intent": intent_key,
                 "vw_cd": config["vw_cd"],
