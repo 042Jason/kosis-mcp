@@ -95,19 +95,19 @@ def _base_url(request: Request) -> str:
 
 @mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
 async def oauth_resource(request: Request) -> Response:
-    return JSONResponse({"resource": _base_url(request)},
+    return JSONResponse({"resource": f"{_base_url(request)}/mcp"},
                         headers={"Access-Control-Allow-Origin": "*"})
 
 
 @mcp.custom_route("/.well-known/oauth-protected-resource/sse", methods=["GET"])
 async def oauth_resource_sse(request: Request) -> Response:
-    return JSONResponse({"resource": _base_url(request)},
+    return JSONResponse({"resource": f"{_base_url(request)}/mcp"},
                         headers={"Access-Control-Allow-Origin": "*"})
 
 
 @mcp.custom_route("/.well-known/oauth-authorization-server", methods=["GET"])
 async def oauth_auth_server(request: Request) -> Response:
-    return JSONResponse({"resource": _base_url(request)},
+    return JSONResponse({"resource": f"{_base_url(request)}/mcp"},
                         headers={"Access-Control-Allow-Origin": "*"})
 
 
@@ -336,4 +336,4 @@ starlette_app = _ApiKeyMiddleware(_fastmcp_app)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+    uvicorn.run(starlette_app, 
