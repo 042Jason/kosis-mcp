@@ -16,7 +16,7 @@ BASE_URL = "https://kosis.kr/openapi"
 # intent → KOSIS search keyword mapping
 # ─────────────────────────────────────────────────────────────────────────────
 INTENT_MAP: dict[str, dict] = {
-    # 대상별
+    # 대상별 (MT_TM1_TITLE)
     "청년": {
         "vw_cd": "MT_TM1_TITLE",
         "keywords": ["청년", "청년층", "청년고용", "청년취업"],
@@ -57,7 +57,7 @@ INTENT_MAP: dict[str, dict] = {
         "keywords": ["한부모", "모자가정", "부자가정"],
         "topic_keywords": ["한부모", "편부", "편모", "모자", "부자가정", "저소득"],
     },
-    # 이슈별
+    # 이슈별 (MT_TM2_TITLE)
     "저출산": {
         "vw_cd": "MT_TM2_TITLE",
         "keywords": ["저출산", "출산", "출생"],
@@ -83,7 +83,7 @@ INTENT_MAP: dict[str, dict] = {
         "keywords": ["저소득", "기초생활", "빈곤"],
         "topic_keywords": ["저소득", "기초생활", "수급자", "빈곤율", "차상위"],
     },
-    # 주제별
+    # 주제별 (MT_ZTITLE)
     "고용": {
         "vw_cd": "MT_ZTITLE",
         "keywords": ["고용", "취업", "실업"],
@@ -119,11 +119,6 @@ INTENT_MAP: dict[str, dict] = {
         "keywords": ["인구", "인구수", "인구통계"],
         "topic_keywords": ["인구", "출생", "사망", "이동", "인구구조"],
     },
-    "지역": {
-        "vw_cd": "MT_TM2_TITLE",
-        "keywords": ["지역", "시도", "지역격차"],
-        "topic_keywords": ["지역", "시도", "지방", "광역시", "균형발전"],
-    },
     "프랜차이즈": {
         "vw_cd": "MT_ZTITLE",
         "keywords": ["프랜차이즈", "가맹점", "가맹사업"],
@@ -133,6 +128,24 @@ INTENT_MAP: dict[str, dict] = {
         "vw_cd": "MT_ZTITLE",
         "keywords": ["소상공인", "자영업", "중소기업"],
         "topic_keywords": ["소상공인", "자영업", "소기업", "창업"],
+    },
+    # 지역통계 (MT_ATITLE01) — 시도·시군구 단위 지역 데이터 전용 뷰
+    "지역": {
+        "vw_cd": "MT_ATITLE01",
+        "keywords": ["지역", "시도", "지역격차", "광역", "기초"],
+        "topic_keywords": ["지역", "시도", "시군구", "지방", "광역시", "균형발전", "지방소멸"],
+    },
+    "지방지표": {
+        "vw_cd": "MT_GTITLE01",
+        "keywords": ["지방지표", "e-지방지표", "지역지표"],
+        "topic_keywords": ["지방", "지역지표", "시군구지표", "생활지표"],
+    },
+    # 기관별 (MT_OTITLE) — 기관명 포함 쿼리
+    "기관별": {
+        "vw_cd": "MT_OTITLE",
+        "keywords": ["통계청", "국토교통부", "보건복지부", "교육부", "고용노동부",
+                     "행정안전부", "농림축산식품부", "산업통상자원부"],
+        "topic_keywords": ["기관", "부처", "청", "원", "공단", "공사"],
     },
 }
 
@@ -355,6 +368,9 @@ class KosisClient:
                 "apiKey": self.api_key,
                 "vwCd": vw_cd,
                 "searchNm": keyword,
+                "sort": "RANK",       # 정확도순 정렬 (가이드 명시값)
+                "startCount": "1",
+                "resultCount": "30",  # 페이지당 30개 (기본 20개보다 많이)
                 "format": "json",
                 "jsonVD": "Y",
                 "errMsg": "Y",
@@ -423,7 +439,7 @@ class KosisClient:
                         if r.get("TBL_ID") and r not in found:
                             found.append({
                                 "org_id": r.get("ORG_ID", ""),
-                                "tbl_id": r.get("TBL_ID", ""),
+                                "tbl_id": r.get("TBL_NM", ""),
                                 "name": r.get("TBL_NM", ""),
                                 "updated": r.get("SEND_DE", ""),
                             })
