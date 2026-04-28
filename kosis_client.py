@@ -40,7 +40,7 @@ INTENT_MAP: dict[str, dict] = {
     "여성": {
         "vw_cd": "MT_TM1_TITLE",
         "keywords": ["여성", "여성고용", "여성경제"],
-        "topic_keywords": ["여성", "모성", "성별", "경력단절", "여성취업"],
+        "topic_keywords": ["여성", "모성", "경력단절", "여성취업"],  # "성별" 제거 — 차원어라 오매칭 유발
     },
     "장애인": {
         "vw_cd": "MT_TM1_TITLE",
@@ -108,6 +108,11 @@ INTENT_MAP: dict[str, dict] = {
         "vw_cd": "MT_ZTITLE",
         "keywords": ["복지", "사회보장", "급여"],
         "topic_keywords": ["사회복지", "복지급여", "사회보장", "복지지출"],
+    },
+    "자살": {
+        "vw_cd": "MT_ZTITLE",
+        "keywords": ["자살", "자살률", "자해", "고의적자해"],
+        "topic_keywords": ["자살", "자살률", "자해", "자살예방", "정신건강"],
     },
     "보건": {
         "vw_cd": "MT_ZTITLE",
