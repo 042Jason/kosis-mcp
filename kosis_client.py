@@ -238,42 +238,63 @@ class KosisClient:
                 raise
         raise last_exc
 
-    # ── 2. Fetch item/dimension codes for a table ────────────────────────────
-    async def _get_item_codes(self, org_id: str, tbl_id: str) -> list[dict]:
+    # ── 2. Probe table structure to discover valid parameters ────────────────
+    async def _probe_table_params(
+        self, org_id: str, tbl_id: str, prd_se: str = "Y"
+    ) -> dict:
         """
-        Returns classification + statistical item codes for a table.
-        Tries Param/statisticsItemList.do first (newer path),
-        falls back to old statisticsItemList.do.
-        HTML response = endpoint redirected → skip.
+        표 구조를 자동 탐지해 유효한 itmId 코드 목록과 차원(objL) 수를 반환.
+        1개 기간 데이터를 최소 요청으로 시도, 응답 행에서 ITM_ID·C1~C8 추출.
+
+        전략: objL 차원 수를 1→3으로 늘려가며 성공할 때까지 시도.
+        두 엔드포인트 모두 실패하면 기본값 반환.
+
+        반환값: {"itm_ids": [...], "n_dims": N}
+        실패 시: {"itm_ids": [], "n_dims": 2}
         """
-        for endpoint in [
-            f"{BASE_URL}/Param/statisticsItemList.do",
-            f"{BASE_URL}/statisticsItemList.do",
-        ]:
-            try:
-                params = {
-                    "method": "getList",
-                    "apiKey": self.api_key,
-                    "orgId": org_id,
-                    "tblId": tbl_id,
-                    "itmDiv": "all",
-                    "format": "json",
-                    "jsonVD": "Y",
-                    "errMsg": "Y",
-                }
-                resp = await self._client.get(endpoint, params=params, timeout=5.0)
-                if resp.status_code != 200:
+        for n in range(1, 4):  # objL 차원 1·2·3 순서로 시도
+            probe = {
+                "method": "getList",
+                "apiKey": self.api_key,
+                "orgId": org_id,
+                "tblId": tbl_id,
+                "prdSe": prd_se,
+                "newEstPrdCnt": "1",
+                "itmId": "ALL",
+                "format": "json",
+                "jsonVD": "Y",
+                "errMsg": "Y",
+            }
+            for i in range(1, n + 1):
+                probe[f"objL{i}"] = "ALL"
+
+            for ep in [
+                f"{BASE_URL}/Param/statisticsParameterData.do",
+                f"{BASE_URL}/statisticsData.do",
+            ]:
+                try:
+                    resp = await self._client.get(ep, params=probe, timeout=8.0)
+                    rows = resp.json()
+                    if not (isinstance(rows, list) and rows):
+                        continue
+                    # ITM_ID 중복 제거 (순서 유지)
+                    seen: dict[str, bool] = {}
+                    for r in rows:
+                        itm = r.get("ITM_ID", "")
+                        if itm and itm not in seen:
+                            seen[itm] = True
+                    # 실제 차원 수: C1~C8 중 값이 있는 최대 인덱스
+                    row0 = rows[0]
+                    actual = max(
+                        (i for i in range(1, 9) if row0.get(f"C{i}")),
+                        default=n,
+                    )
+                    return {"itm_ids": list(seen.keys()), "n_dims": actual}
+                except Exception:
                     continue
-                # HTML 응답 = 리다이렉트된 엔드포인트 → 건너뜀
-                ct = resp.headers.get("content-type", "")
-                if "html" in ct.lower():
-                    continue
-                data = resp.json()
-                if isinstance(data, list) and data:
-                    return data
-            except Exception:
-                continue
-        return []
+
+        # 모든 시도 실패 → 2차원 기본값 (DT_FR0001N 등 2-dim 테이블 대응)
+        return {"itm_ids": [], "n_dims": 2}
 
     # ── 3. Statistics data ───────────────────────────────────────────────────
     async def get_statistics_data(
@@ -287,119 +308,66 @@ class KosisClient:
         end_prd_de: Optional[str] = None,
         new_est_prd_cnt: Optional[int] = 15,
     ) -> list[dict]:
-        params = {
-            "method": "getList",
-            "apiKey": self.api_key,
-            "orgId": org_id,
-            "tblId": tbl_id,
-            "objL1": obj_l1,
-            "itmId": itm_id,
-            "prdSe": prd_se,
-            "format": "json",
-            "jsonVD": "Y",
-            "errMsg": "Y",
-        }
-        if start_prd_de:
-            params["startPrdDe"] = start_prd_de
-        if end_prd_de:
-            params["endPrdDe"] = end_prd_de
-        if new_est_prd_cnt and not start_prd_de:
-            params["newEstPrdCnt"] = str(new_est_prd_cnt)
 
+        def _build_params(**extra) -> dict:
+            """공통 파라미터 베이스 생성."""
+            p = {
+                "method": "getList",
+                "apiKey": self.api_key,
+                "orgId": org_id,
+                "tblId": tbl_id,
+                "prdSe": prd_se,
+                "format": "json",
+                "jsonVD": "Y",
+                "errMsg": "Y",
+            }
+            if start_prd_de:
+                p["startPrdDe"] = start_prd_de
+            if end_prd_de:
+                p["endPrdDe"] = end_prd_de
+            if new_est_prd_cnt and not start_prd_de:
+                p["newEstPrdCnt"] = str(new_est_prd_cnt)
+            p.update(extra)
+            return p
+
+        # ── 1차 시도: 주어진 파라미터로 Param 엔드포인트 ─────────────────────
         resp = await self._client.get(
-            f"{BASE_URL}/Param/statisticsParameterData.do", params=params
+            f"{BASE_URL}/Param/statisticsParameterData.do",
+            params=_build_params(objL1=obj_l1, itmId=itm_id),
         )
         resp.raise_for_status()
         data = resp.json()
 
-        # ── objL / itmId error: fetch actual codes and retry ─────────────────
+        # ── err 20: 차원/항목코드 불일치 → 표 구조 자동 탐지 후 재시도 ──────
         if isinstance(data, dict) and data.get("err") == "20":
-            items = await self._get_item_codes(org_id, tbl_id)
+            resolved = await self._probe_table_params(org_id, tbl_id, prd_se)
+            n_dims = resolved["n_dims"]        # 실제 objL 차원 수
+            itm_ids = resolved["itm_ids"]      # 유효 항목 코드 목록
 
-            # 분류 항목(objL) 과 통계 항목(itmId) 분리
-            # OBJ_ID 있음 → 분류(분류코드) → objL 파라미터
-            # OBJ_ID 없음 → 통계항목(항목코드) → itmId 파라미터
-            dim_order: list[str] = []
-            dim_items: dict[str, list[str]] = {}
-            itm_ids: list[str] = []
-            for it in items:
-                obj_id = it.get("OBJ_ID", "")
-                itmc_id = it.get("ITMC_ID", "")
-                itm_id = it.get("ITM_ID", "")
-                if obj_id:
-                    if obj_id not in dim_items:
-                        dim_order.append(obj_id)
-                        dim_items[obj_id] = []
-                    if itmc_id:
-                        dim_items[obj_id].append(itmc_id)
-                else:
-                    code = itm_id or itmc_id
-                    if code:
-                        itm_ids.append(code)
+            # 재시도 파라미터: 모든 차원 ALL + 구체적 itmId (없으면 ALL)
+            retry_extra = {f"objL{i}": "ALL" for i in range(1, n_dims + 1)}
+            retry_extra["itmId"] = "+".join(itm_ids[:30]) if itm_ids else "ALL"
+            retry = _build_params(**retry_extra)
 
-            if items:
-                # objL 재구성: ITMC_ID 목록 '+' 조인, 40,000셀 제한으로 30개 캡
-                for k in list(params.keys()):
-                    if k.startswith("objL"):
-                        params.pop(k)
-                for idx, obj_id in enumerate(dim_order[:8], start=1):
-                    codes = dim_items.get(obj_id, [])
-                    params[f"objL{idx}"] = "+".join(codes[:30]) if codes else obj_id
+            # 2차: Param 엔드포인트
+            resp2 = await self._client.get(
+                f"{BASE_URL}/Param/statisticsParameterData.do", params=retry
+            )
+            resp2.raise_for_status()
+            data = resp2.json()
 
-                # itmId: 실제 항목 코드가 있으면 사용, 없으면 ALL 유지
-                if itm_ids:
-                    params["itmId"] = "+".join(itm_ids[:30])
-
-                resp2 = await self._client.get(
-                    f"{BASE_URL}/Param/statisticsParameterData.do", params=params
-                )
-                resp2.raise_for_status()
-                data = resp2.json()
-
-                # OBJ_ID 직접 사용 재시도 (일부 테이블은 ITMC_ID 대신 OBJ_ID 요구)
-                if isinstance(data, dict) and data.get("err") == "20":
-                    for idx, obj_id in enumerate(dim_order[:8], start=1):
-                        params[f"objL{idx}"] = obj_id
-                    resp3 = await self._client.get(
-                        f"{BASE_URL}/Param/statisticsParameterData.do", params=params
-                    )
-                    resp3.raise_for_status()
-                    data = resp3.json()
-
-            # 최종 폴백: 표준 statisticsData.do — 모든 objL 차원 ALL로 세팅
+            # 3차: 표준 statisticsData.do 폴백 (Param이 여전히 실패하는 경우)
             if isinstance(data, dict) and data.get("err") == "20":
-                std_params = {
-                    "method": "getList",
-                    "apiKey": self.api_key,
-                    "orgId": org_id,
-                    "tblId": tbl_id,
-                    "prdSe": prd_se,
-                    "format": "json",
-                    "jsonVD": "Y",
-                    "errMsg": "Y",
-                }
-                # 발견된 차원 수만큼 ALL 세팅, 없으면 최소 objL1=ALL
-                if dim_order:
-                    for idx, obj_id in enumerate(dim_order[:8], start=1):
-                        codes = dim_items.get(obj_id, [])
-                        std_params[f"objL{idx}"] = "+".join(codes[:30]) if codes else "ALL"
-                else:
-                    std_params["objL1"] = "ALL"
-                std_params["itmId"] = "+".join(itm_ids[:30]) if itm_ids else "ALL"
-                if start_prd_de:
-                    std_params["startPrdDe"] = start_prd_de
-                if end_prd_de:
-                    std_params["endPrdDe"] = end_prd_de
-                if new_est_prd_cnt and not start_prd_de:
-                    std_params["newEstPrdCnt"] = str(new_est_prd_cnt)
-                resp4 = await self._client.get(
-                    f"{BASE_URL}/statisticsData.do", params=std_params
+                resp3 = await self._client.get(
+                    f"{BASE_URL}/statisticsData.do", params=retry
                 )
-                resp4.raise_for_status()
-                data = resp4.json()
+                resp3.raise_for_status()
+                data = resp3.json()
 
         if isinstance(data, dict) and "err" in data:
-            raise ValueError(f"KOSIS API error: {data}  request_id: {data.get('request_id', '')}")
+            raise ValueError(
+                f"KOSIS API error: {data}  request_id: {data.get('request_id', '')}"
+            )
         return data if isinstance(data, list) else []
 
     # ── 4. Statistics explanation ────────────────────────────────────────────
