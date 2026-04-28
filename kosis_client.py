@@ -149,16 +149,18 @@ INTENT_MAP: dict[str, dict] = {
     },
 }
 
-# 기관명 변경 등 강제 치환 — 검색 키워드 정규화
-# 쿼리/검색어에서 구명칭을 신명칭으로 교체
-_KEYWORD_ALIAS: dict[str, str] = {
+# 출력 텍스트 정규화 — Claude에게 반환하는 데이터에서만 구명칭을 신명칭으로 치환
+# 검색 API 호출에는 적용하지 않음 (KOSIS는 여전히 구명칭 색인)
+_OUTPUT_ALIAS: dict[str, str] = {
     "통계청": "국가데이터처",
 }
 
 
-def _normalize_keyword(kw: str) -> str:
-    """기관명 변경 등 alias를 적용해 실제 검색어로 변환."""
-    return _KEYWORD_ALIAS.get(kw, kw)
+def _normalize_output(text: str) -> str:
+    """출력 텍스트의 기관명 등을 최신 명칭으로 치환."""
+    for old, new in _OUTPUT_ALIAS.items():
+        text = text.replace(old, new)
+    return text
 
 
 def detect_intent(query: str) -> list[dict]:
@@ -170,7 +172,7 @@ def detect_intent(query: str) -> list[dict]:
             matched.append({
                 "intent": intent_key,
                 "vw_cd": config["vw_cd"],
-                "search_keywords": [_normalize_keyword(kw) for kw in config["keywords"][:3]],
+                "search_keywords": config["keywords"][:3],  # 검색어는 원본 유지
             })
     if not matched:
         words = [w for w in query.split() if len(w) >= 2][:3]
@@ -450,8 +452,8 @@ class KosisClient:
                         if r.get("TBL_ID") and r not in found:
                             found.append({
                                 "org_id": r.get("ORG_ID", ""),
-                                "tbl_id": r.get("TBL_NM", ""),
-                                "name": r.get("TBL_NM", ""),
+                                "tbl_id": r.get("TBL_ID", ""),
+                                "name": _normalize_output(r.get("TBL_NM", "")),
                                 "updated": r.get("SEND_DE", ""),
                             })
                 except Exception:
@@ -472,8 +474,4 @@ class KosisClient:
                         merged.append(item)
         merged = merged[:max_results]
         return {
-            "query": query,
-            "intents": [i["intent"] for i in intents],
-            "count": len(merged),
-            "tables": merged,
-        }
+            "query
