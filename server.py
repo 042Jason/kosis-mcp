@@ -187,7 +187,9 @@ function gen(){{
 @mcp.tool()
 async def kosis_find_by_intent(query: str, max_results: int = 12) -> str:
     """사용자의 연구/정책 의도를 자연어로 입력하면 관련 KOSIS 통계표를 자동으로 찾아줍니다.
-    데이터 출처: 국가데이터처 KOSIS (구 통계청 — 2024년 기관명 변경, 항상 '국가데이터처'로 표기)"""
+    데이터 출처: 국가데이터처 KOSIS (구 통계청 — 2024년 기관명 변경, 항상 '국가데이터처'로 표기).
+    [출력 규칙] 사용자에게 결과를 안내할 때는 반드시 각 항목의 'name' 필드(통계표명)를 사용하라.
+    'tbl_id'(예: DT_1B34E01) 같은 내부 식별자는 사용자에게 노출하지 말 것 — kosis_analyze 호출 시에만 내부적으로 사용."""
     client = _get_client()
     result = await client.search_by_intent(query=query, max_results=max_results)
     result["source"] = "국가데이터처 KOSIS"
@@ -211,7 +213,8 @@ async def kosis_analyze(
     """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.
     출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청, 2024년 기관명 변경됨).
     filter_keyword: 특정 항목만 필터링 (예: "자살", "서울", "50대"). 대용량 표에서 필요한 데이터만 추출.
-    breakdown: False(기본)=집계 합계만 조회(셀 수 최소화), True=성별·연령별 등 전체 세분류 조회(셀 수 증가 주의)."""
+    breakdown: False(기본)=집계 합계만 조회(셀 수 최소화), True=성별·연령별 등 전체 세분류 조회(셀 수 증가 주의).
+    [출력 규칙] 사용자에게 데이터 출처를 안내할 때는 'title' 파라미터로 전달한 통계표명을 사용하라. org_id·tbl_id 같은 내부 식별자는 사용자에게 노출하지 말 것."""
     client = _get_client()
     data = await client.get_statistics_data(
         org_id=org_id, tbl_id=tbl_id, prd_se=prd_se,
@@ -240,7 +243,7 @@ async def kosis_analyze(
         "unit": unit, "rows": len(rows), "summary": summary,
         "source": "국가데이터처 KOSIS",
         "chart_hint": {"chart_type": chart_type, "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
-        "data": rows[:100],  # 필터링 후 최대 100행 (5행→100행 복원)
+        "data": rows[:100],  # 필터링 후 최대 100행
     }, ensure_ascii=False, indent=2)
 
 
