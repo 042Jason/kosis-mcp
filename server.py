@@ -1,7 +1,5 @@
 """
-KOSIS MCP 서버 -- Streamable HTTP transport (MCP 2025-03-26 spec)
-
-접속 URL: https://your-server.com/mcp?kosis_key=발급받은_인증키
+KOSIS MCP Server - Streamable HTTP transport (MCP 2025-03-26 spec)
 """
 
 import asyncio
@@ -18,12 +16,12 @@ from starlette.applications import Starlette
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, Response
-from starlette.routing import Mount, Route
+from starlette.routing import Route
 from starlette.types import Receive, Scope, Send
 
 from kosis_client import KosisClient, INTENT_MAP
 
-# -- 설정 -----------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 DEFAULT_API_KEY = os.environ.get("KOSIS_API_KEY", "")
 
 _api_key_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -38,7 +36,7 @@ def _get_client() -> KosisClient:
     return KosisClient(key)
 
 
-# -- 데이터 전처리 ---------------------------------------------------------------
+# ---------------------------------------------------------------------------
 _KEEP_FIELDS = {"PRD_DE", "DT", "ITM_NM", "C1_NM", "C2_NM", "C3_NM", "UNIT_NM"}
 
 
@@ -87,7 +85,7 @@ def _process_data(data: list, color_field=None):
     return df.to_dict(orient="records"), summary, unit
 
 
-# -- MCP 서버 -------------------------------------------------------------------
+# ---------------------------------------------------------------------------
 mcp_server = Server("kosis-mcp")
 
 
@@ -113,8 +111,7 @@ async def list_tools() -> list[types.Tool]:
         types.Tool(
             name="kosis_analyze",
             description=(
-                "KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.\n"
-                "반환된 data 배열과 chart_hint를 활용해 Claude가 직접 시각화를 생성합니다."
+                "KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다."
             ),
             inputSchema={
                 "type": "object",
@@ -152,7 +149,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="kosis_explain",
-            description="통계표의 조사 목적·주기·대상범위 등 메타데이터를 조회합니다.",
+            description="통계표의 조사 목적, 주기, 대상범위 등 메타데이터를 조회합니다.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -164,7 +161,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="kosis_dashboard",
-            description="여러 통계표 데이터를 한꺼번에 조회해 반환합니다. Claude가 대시보드로 시각화합니다.",
+            description="여러 통계표 데이터를 한꺼번에 조회해 반환합니다.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -203,7 +200,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         )
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
-    elif name == "kosis_analyze":
+    if name == "kosis_analyze":
         org_id = arguments["org_id"]
         tbl_id = arguments["tbl_id"]
         title = arguments["title"]
@@ -236,7 +233,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         }
         return [types.TextContent(type="text", text=json.dumps(result, ensure_ascii=False, indent=2))]
 
-    elif name == "kosis_browse":
+    if name == "kosis_browse":
         result = await client.browse_categories(
             vw_cd=arguments.get("vw_cd", "MT_ZTITLE"),
             parent_list_id=arguments.get("parent_list_id", "A"),
@@ -255,7 +252,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
             "tip": "sub_categories의 list_id를 parent_list_id로 넣거나, tables의 org_id+tbl_id로 kosis_analyze 호출",
         }, ensure_ascii=False, indent=2))]
 
-    elif name == "kosis_explain":
+    if name == "kosis_explain":
         data = await client.get_statistics_explanation(
             org_id=arguments["org_id"], tbl_id=arguments["tbl_id"]
         )
@@ -266,7 +263,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         ]
         return [types.TextContent(type="text", text=json.dumps(compact[:5], ensure_ascii=False, indent=2))]
 
-    elif name == "kosis_dashboard":
+    if name == "kosis_dashboard":
         async def fetch_ds(ds_cfg):
             try:
                 data = await client.get_statistics_data(
@@ -308,7 +305,7 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     raise ValueError(f"Unknown tool: {name}")
 
 
-# -- Streamable HTTP transport --------------------------------------------------
+# ---------------------------------------------------------------------------
 session_manager = StreamableHTTPSessionManager(
     app=mcp_server,
     event_store=None,
@@ -318,14 +315,6 @@ session_manager = StreamableHTTPSessionManager(
 
 
 class _McpApp:
-    """
-    /mcp 와 /sse 양쪽에서 요청을 받아 API 키를 contextvar에 설정한 뒤
-    StreamableHTTPSessionManager에 위임합니다.
-
-    - GET  /mcp?kosis_key=... → SSE 스트림 (이벤트 수신)
-    - POST /mcp?kosis_key=... → JSON 메시지 (도구 호출 등)
-    """
-
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         request = Request(scope, receive)
         api_key = request.query_params.get("kosis_key", "") or DEFAULT_API_KEY
@@ -338,8 +327,13 @@ class _McpApp:
 
 _mcp_app = _McpApp()
 
+_OAUTH_PREFIXES = (
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-authorization-server",
+)
+_MCP_PATHS = ("/mcp", "/sse")
 
-# -- 일반 페이지 핸들러 ----------------------------------------------------------
+
 async def handle_health(request: Request) -> Response:
     return JSONResponse({"status": "ok", "server": "kosis-mcp"})
 
@@ -380,21 +374,21 @@ a{{color:#2563eb}}
   <div class="card">
     <h2>접속 URL 생성</h2>
     <input id="k" type="text" placeholder="KOSIS 인증키 입력 (kosis.kr/openapi)"/>
-    <button class="btn" onclick="gen()">생성 →</button>
+    <button class="btn" onclick="gen()">생성</button>
     <div id="url-out"></div>
   </div>
   <div class="card">
     <h2>Claude 연결 방법</h2>
-    <p style="font-size:.92rem;color:#475569;margin-bottom:12px">Claude 앱 → Settings → Integrations → Add custom integration</p>
+    <p style="font-size:.92rem;color:#475569;margin-bottom:12px">Claude 앱 Settings - Integrations - Add custom integration</p>
     <code id="cfg">{mcp_url}</code>
   </div>
 </div>
 <div class="footer"><a href="https://kosis.kr">통계청 KOSIS</a></div>
 <script>
 function gen(){{
-  const k=document.getElementById('k').value.trim();
-  if(!k)return alert('인증키를 입력하세요');
-  const u=`{base_url}/mcp?kosis_key=${{k}}`;
+  var k=document.getElementById('k').value.trim();
+  if(!k){{alert('인증키를 입력하세요');return;}}
+  var u='{base_url}/mcp?kosis_key='+k;
   document.getElementById('url-out').innerHTML='<code style="margin-top:8px;background:#0f172a;color:#7dd3fc;padding:13px 16px;border-radius:9px;display:block;word-break:break-all">'+u+'</code>';
   document.getElementById('cfg').textContent=u;
 }}
@@ -404,14 +398,17 @@ function gen(){{
     return HTMLResponse(html)
 
 
-# -- 전체 ASGI 앱 ---------------------------------------------------------------
+async def handle_oauth_resource(request: Request) -> Response:
+    host = request.headers.get("host", "localhost")
+    scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
+    return JSONResponse(
+        {"resource": f"{scheme}://{host}"},
+        headers={"Access-Control-Allow-Origin": "*"},
+    )
+
+
 class _KosisMcpApp:
-    """
-    /mcp, /sse → StreamableHTTP MCP 핸들러
-    /          → 홈페이지
-    /health    → 헬스체크
-    그 외      → 404
-    """
+    """Top-level ASGI router."""
 
     def __init__(self) -> None:
         self._starlette = Starlette(
@@ -428,14 +425,30 @@ class _KosisMcpApp:
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        path = scope.get("path", "")
-        if scope["type"] == "http" and path in ("/mcp", "/sse"):
-            await _mcp_app(scope, receive, send)
-        else:
+        if scope["type"] != "http":
             await self._starlette(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+
+        if path in _MCP_PATHS:
+            await _mcp_app(scope, receive, send)
+            return
+
+        if any(path.startswith(p) for p in _OAUTH_PREFIXES):
+            request = Request(scope, receive)
+            response = await handle_oauth_resource(request)
+            await response(scope, receive, send)
+            return
+
+        await self._starlette(scope, receive, send)
 
 
 app = _KosisMcpApp()
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
