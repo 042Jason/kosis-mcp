@@ -365,4 +365,20 @@ class _ApiKeyMiddleware:
                 scope["path"] = "/mcp"
                 scope["raw_path"] = b"/mcp"
 
-            from st
+            from starlette.requests import Request as Req
+            req = Req(scope)
+            api_key = req.query_params.get("kosis_key", "") or DEFAULT_API_KEY
+            token = _api_key_ctx.set(api_key)
+            try:
+                await self._app(scope, receive, send)
+            finally:
+                _api_key_ctx.reset(token)
+        else:
+            await self._app(scope, receive, send)
+
+
+starlette_app = _ApiKeyMiddleware(_fastmcp_app)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(starlette_app, host="0.0.0.0", port=port, log_level="info")
