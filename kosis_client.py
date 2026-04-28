@@ -310,10 +310,20 @@ class KosisClient:
                             (i for i in range(1, 9) if row0.get(f"C{i}")),
                             default=n,
                         )
+                        # "계/합계/전국" 코드 추출 — ALL 대신 집계 코드만 요청해 셀 수 절감
+                        total_codes: dict[str, str] = {}
+                        _total_kws = {"계", "합계", "전국", "전체", "소계"}
+                        for r in rows:
+                            for ci in range(1, 9):
+                                dim_nm = r.get(f"C{ci}_NM", "")
+                                dim_val = r.get(f"C{ci}", "")
+                                if dim_val and dim_nm in _total_kws:
+                                    total_codes[str(ci)] = dim_val
                         return {
                             "itm_ids": list(seen.keys()),
                             "n_dims": actual,
-                            "prd_se": cur_prd,  # 실제 성공한 주기
+                            "prd_se": cur_prd,
+                            "total_codes": total_codes,  # {dim_idx: code} 집계 코드
                         }
                     except Exception:
                         continue
@@ -395,7 +405,11 @@ class KosisClient:
                     p.update(extra)
                     return p
 
-            retry_extra = {f"objL{i}": "ALL" for i in range(1, n_dims + 1)}
+            total_codes = resolved.get("total_codes", {})
+            retry_extra = {}
+            for i in range(1, n_dims + 1):
+                # 집계 코드가 있으면 해당 코드만, 없으면 ALL
+                retry_extra[f"objL{i}"] = total_codes.get(str(i), "ALL")
             retry_extra["itmId"] = "+".join(itm_ids[:30]) if itm_ids else "ALL"
             retry = _build_params(**retry_extra)
 
