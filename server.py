@@ -225,7 +225,7 @@ async def kosis_analyze(
         "title": title, "org_id": org_id, "tbl_id": tbl_id,
         "unit": unit, "rows": len(rows), "summary": summary,
         "chart_hint": {"chart_type": chart_type, "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
-        "data": rows[:300],
+        "sample": rows[:5],  # 구조 파악용 샘플만 (전체 raw data 제거 → 토큰 절감)
     }, ensure_ascii=False, indent=2)
 
 
@@ -280,7 +280,7 @@ async def kosis_dashboard(datasets: list, dashboard_title: str = "KOSIS 통계 �
                 "unit": unit, "rows": len(rows), "summary": summary,
                 "chart_hint": {"chart_type": ds_cfg.get("chart_type", "line"),
                                "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
-                "data": rows[:150],
+                "sample": rows[:5],
             }
         except Exception as e:
             return {"title": ds_cfg.get("title", ""), "error": str(e)}
@@ -336,4 +336,4 @@ starlette_app = _ApiKeyMiddleware(_fastmcp_app)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+    uvicorn.run(starlette_app, host="0.0.0

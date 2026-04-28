@@ -163,6 +163,18 @@ def _normalize_output(text: str) -> str:
     return text
 
 
+# 검색 시 제거할 한국어 불용어 (조사·동사·일반명사 등 KOSIS 검색에 무의미한 단어)
+_STOPWORDS = {
+    "통계", "찾아줘", "알려줘", "보여줘", "데이터", "현황", "분석", "조회",
+    "정보", "자료", "관련", "있어", "있나", "있나요", "줘", "해줘",
+    "알고싶어", "궁금해", "뭐야", "어때", "어떻게", "최근", "최신",
+    "한국", "대한민국", "전국", "우리나라",
+}
+
+# 일반 인텐트 폴백 시 병렬 검색할 추가 vw_cd 목록
+_FALLBACK_VW_CDS = ["MT_ZTITLE", "MT_TM1_TITLE", "MT_TM2_TITLE"]
+
+
 def detect_intent(query: str) -> list[dict]:
     matched = []
     query_lower = query.lower()
@@ -172,15 +184,19 @@ def detect_intent(query: str) -> list[dict]:
             matched.append({
                 "intent": intent_key,
                 "vw_cd": config["vw_cd"],
-                "search_keywords": config["keywords"][:3],  # 검색어는 원본 유지
+                "search_keywords": config["keywords"][:3],
             })
     if not matched:
-        words = [w for w in query.split() if len(w) >= 2][:3]
-        matched.append({
-            "intent": "일반",
-            "vw_cd": "MT_ZTITLE",
-            "search_keywords": words or [query[:10]],
-        })
+        # 불용어 제거 후 의미 있는 단어만 추출
+        clean = [w for w in query.split() if len(w) >= 2 and w not in _STOPWORDS]
+        keywords = clean[:3] or [query[:10]]
+        # 다중 vw_cd에서 병렬 검색되도록 각각 등록
+        for vw_cd in _FALLBACK_VW_CDS:
+            matched.append({
+                "intent": "일반",
+                "vw_cd": vw_cd,
+                "search_keywords": keywords,
+            })
     return matched
 
 
@@ -243,58 +259,66 @@ class KosisClient:
         self, org_id: str, tbl_id: str, prd_se: str = "Y"
     ) -> dict:
         """
-        표 구조를 자동 탐지해 유효한 itmId 코드 목록과 차원(objL) 수를 반환.
-        1개 기간 데이터를 최소 요청으로 시도, 응답 행에서 ITM_ID·C1~C8 추출.
+        표 구조를 자동 탐지해 유효한 itmId 코드 목록, 차원(objL) 수,
+        실제 수록주기(prd_se)를 반환.
 
-        전략: objL 차원 수를 1→3으로 늘려가며 성공할 때까지 시도.
-        두 엔드포인트 모두 실패하면 기본값 반환.
+        전략:
+          1. 주어진 prd_se(기본 Y)로 objL 차원 1~3 시도
+          2. 전부 실패하면 prd_se = M(월), Q(분기)로 재시도
+          3. 두 엔드포인트 모두 실패하면 기본값 반환
 
-        반환값: {"itm_ids": [...], "n_dims": N}
-        실패 시: {"itm_ids": [], "n_dims": 2}
+        반환값: {"itm_ids": [...], "n_dims": N, "prd_se": "Y"|"M"|"Q"}
+        실패 시: {"itm_ids": [], "n_dims": 2, "prd_se": prd_se}
         """
-        for n in range(1, 4):  # objL 차원 1·2·3 순서로 시도
-            probe = {
-                "method": "getList",
-                "apiKey": self.api_key,
-                "orgId": org_id,
-                "tblId": tbl_id,
-                "prdSe": prd_se,
-                "newEstPrdCnt": "1",
-                "itmId": "ALL",
-                "format": "json",
-                "jsonVD": "Y",
-                "errMsg": "Y",
-            }
-            for i in range(1, n + 1):
-                probe[f"objL{i}"] = "ALL"
+        # prd_se 후보: 주어진 값 우선, 그 다음 나머지 순서로 시도
+        all_prd = ["Y", "M", "Q"]
+        prd_candidates = [prd_se] + [p for p in all_prd if p != prd_se]
 
-            for ep in [
-                f"{BASE_URL}/Param/statisticsParameterData.do",
-                f"{BASE_URL}/statisticsData.do",
-            ]:
-                try:
-                    resp = await self._client.get(ep, params=probe, timeout=8.0)
-                    rows = resp.json()
-                    if not (isinstance(rows, list) and rows):
+        for cur_prd in prd_candidates:
+            for n in range(1, 4):  # objL 차원 1·2·3
+                probe = {
+                    "method": "getList",
+                    "apiKey": self.api_key,
+                    "orgId": org_id,
+                    "tblId": tbl_id,
+                    "prdSe": cur_prd,
+                    "newEstPrdCnt": "1",
+                    "itmId": "ALL",
+                    "format": "json",
+                    "jsonVD": "Y",
+                    "errMsg": "Y",
+                }
+                for i in range(1, n + 1):
+                    probe[f"objL{i}"] = "ALL"
+
+                for ep in [
+                    f"{BASE_URL}/Param/statisticsParameterData.do",
+                    f"{BASE_URL}/statisticsData.do",
+                ]:
+                    try:
+                        resp = await self._client.get(ep, params=probe, timeout=8.0)
+                        rows = resp.json()
+                        if not (isinstance(rows, list) and rows):
+                            continue
+                        seen: dict[str, bool] = {}
+                        for r in rows:
+                            itm = r.get("ITM_ID", "")
+                            if itm and itm not in seen:
+                                seen[itm] = True
+                        row0 = rows[0]
+                        actual = max(
+                            (i for i in range(1, 9) if row0.get(f"C{i}")),
+                            default=n,
+                        )
+                        return {
+                            "itm_ids": list(seen.keys()),
+                            "n_dims": actual,
+                            "prd_se": cur_prd,  # 실제 성공한 주기
+                        }
+                    except Exception:
                         continue
-                    # ITM_ID 중복 제거 (순서 유지)
-                    seen: dict[str, bool] = {}
-                    for r in rows:
-                        itm = r.get("ITM_ID", "")
-                        if itm and itm not in seen:
-                            seen[itm] = True
-                    # 실제 차원 수: C1~C8 중 값이 있는 최대 인덱스
-                    row0 = rows[0]
-                    actual = max(
-                        (i for i in range(1, 9) if row0.get(f"C{i}")),
-                        default=n,
-                    )
-                    return {"itm_ids": list(seen.keys()), "n_dims": actual}
-                except Exception:
-                    continue
 
-        # 모든 시도 실패 → 2차원 기본값 (DT_FR0001N 등 2-dim 테이블 대응)
-        return {"itm_ids": [], "n_dims": 2}
+        return {"itm_ids": [], "n_dims": 2, "prd_se": prd_se}
 
     # ── 3. Statistics data ───────────────────────────────────────────────────
     async def get_statistics_data(
@@ -338,13 +362,39 @@ class KosisClient:
         resp.raise_for_status()
         data = resp.json()
 
-        # ── err 20: 차원/항목코드 불일치 → 표 구조 자동 탐지 후 재시도 ──────
-        if isinstance(data, dict) and data.get("err") == "20":
+        # ── err 20 또는 빈 결과: 표 구조 + 수록주기 자동 탐지 후 재시도 ────
+        needs_retry = (
+            (isinstance(data, dict) and data.get("err") == "20")
+            or (isinstance(data, list) and len(data) == 0)
+        )
+        if needs_retry:
             resolved = await self._probe_table_params(org_id, tbl_id, prd_se)
-            n_dims = resolved["n_dims"]        # 실제 objL 차원 수
-            itm_ids = resolved["itm_ids"]      # 유효 항목 코드 목록
+            n_dims = resolved["n_dims"]
+            itm_ids = resolved["itm_ids"]
+            actual_prd = resolved["prd_se"]  # 탐지된 실제 수록주기
 
-            # 재시도 파라미터: 모든 차원 ALL + 구체적 itmId (없으면 ALL)
+            # prd_se가 달라졌으면 _build_params 재정의
+            if actual_prd != prd_se:
+                def _build_params(**extra) -> dict:  # noqa: F811
+                    p = {
+                        "method": "getList",
+                        "apiKey": self.api_key,
+                        "orgId": org_id,
+                        "tblId": tbl_id,
+                        "prdSe": actual_prd,
+                        "format": "json",
+                        "jsonVD": "Y",
+                        "errMsg": "Y",
+                    }
+                    if start_prd_de:
+                        p["startPrdDe"] = start_prd_de
+                    if end_prd_de:
+                        p["endPrdDe"] = end_prd_de
+                    if new_est_prd_cnt and not start_prd_de:
+                        p["newEstPrdCnt"] = str(new_est_prd_cnt)
+                    p.update(extra)
+                    return p
+
             retry_extra = {f"objL{i}": "ALL" for i in range(1, n_dims + 1)}
             retry_extra["itmId"] = "+".join(itm_ids[:30]) if itm_ids else "ALL"
             retry = _build_params(**retry_extra)
@@ -356,7 +406,7 @@ class KosisClient:
             resp2.raise_for_status()
             data = resp2.json()
 
-            # 3차: 표준 statisticsData.do 폴백 (Param이 여전히 실패하는 경우)
+            # 3차: 표준 statisticsData.do 폴백
             if isinstance(data, dict) and data.get("err") == "20":
                 resp3 = await self._client.get(
                     f"{BASE_URL}/statisticsData.do", params=retry
