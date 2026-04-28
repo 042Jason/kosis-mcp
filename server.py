@@ -21,7 +21,6 @@ from starlette.types import Receive, Scope, Send
 
 from kosis_client import KosisClient, INTENT_MAP
 
-# ---------------------------------------------------------------------------
 DEFAULT_API_KEY = os.environ.get("KOSIS_API_KEY", "")
 
 _api_key_ctx: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -36,7 +35,6 @@ def _get_client() -> KosisClient:
     return KosisClient(key)
 
 
-# ---------------------------------------------------------------------------
 _KEEP_FIELDS = {"PRD_DE", "DT", "ITM_NM", "C1_NM", "C2_NM", "C3_NM", "UNIT_NM"}
 
 
@@ -85,7 +83,6 @@ def _process_data(data: list, color_field=None):
     return df.to_dict(orient="records"), summary, unit
 
 
-# ---------------------------------------------------------------------------
 mcp_server = Server("kosis-mcp")
 
 
@@ -110,9 +107,7 @@ async def list_tools() -> list[types.Tool]:
         ),
         types.Tool(
             name="kosis_analyze",
-            description=(
-                "KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다."
-            ),
+            description="KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -305,7 +300,6 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
     raise ValueError(f"Unknown tool: {name}")
 
 
-# ---------------------------------------------------------------------------
 session_manager = StreamableHTTPSessionManager(
     app=mcp_server,
     event_store=None,
@@ -327,11 +321,14 @@ class _McpApp:
 
 _mcp_app = _McpApp()
 
-_OAUTH_PREFIXES = (
-    "/.well-known/oauth-protected-resource",
-    "/.well-known/oauth-authorization-server",
-)
 _MCP_PATHS = ("/mcp", "/sse")
+
+_OAUTH_PATHS = {
+    "/.well-known/oauth-protected-resource",
+    "/.well-known/oauth-protected-resource/sse",
+    "/.well-known/oauth-authorization-server",
+    "/register",
+}
 
 
 async def handle_health(request: Request) -> Response:
@@ -368,7 +365,7 @@ a{{color:#2563eb}}
 <body>
 <div class="hero">
   <h1>KOSIS MCP <span class="badge">Running</span></h1>
-  <p style="opacity:.85;margin-top:8px">KOSIS 통계 데이터를 Claude가 검색·분석·시각화</p>
+  <p style="opacity:.85;margin-top:8px">KOSIS 통계 데이터를 Claude가 검색, 분석, 시각화</p>
 </div>
 <div class="wrap">
   <div class="card">
@@ -396,15 +393,6 @@ function gen(){{
 </body>
 </html>"""
     return HTMLResponse(html)
-
-
-async def handle_oauth_resource(request: Request) -> Response:
-    host = request.headers.get("host", "localhost")
-    scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
-    return JSONResponse(
-        {"resource": f"{scheme}://{host}"},
-        headers={"Access-Control-Allow-Origin": "*"},
-    )
 
 
 class _KosisMcpApp:
@@ -435,9 +423,14 @@ class _KosisMcpApp:
             await _mcp_app(scope, receive, send)
             return
 
-        if any(path.startswith(p) for p in _OAUTH_PREFIXES):
+        if path in _OAUTH_PATHS or path.startswith("/.well-known/"):
             request = Request(scope, receive)
-            response = await handle_oauth_resource(request)
+            host = request.headers.get("host", "localhost")
+            scheme = "https" if request.headers.get("x-forwarded-proto") == "https" else "http"
+            response = JSONResponse(
+                {"resource": f"{scheme}://{host}"},
+                headers={"Access-Control-Allow-Origin": "*"},
+            )
             await response(scope, receive, send)
             return
 
