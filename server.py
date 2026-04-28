@@ -230,10 +230,9 @@ async def kosis_analyze(
       예) "자살" → 자살 포함 행만 / "대전 서구" → 대전+서구 모두 포함 행만 (전국 서구 중복 해소).
       지역명 중복이 있는 경우 반드시 상위+하위 지역명을 함께 입력하라 (예: "부산 중구", "서울 중구").
     breakdown: False(기본)=집계 합계만 조회(셀 수 최소화), True=성별·연령별 등 전체 세분류 조회(셀 수 증가 주의).
-    [출처 표시 — 필수, 예외 없음] 이 도구를 호출한 결과를 사용자에게 전달할 때는 출력 형식과 무관하게 항상 아래 규칙을 따르라.
-    - 텍스트·요약·분석: 응답 마지막에 반드시 "출처: 국가데이터처 KOSIS 「{title}」 {url}" 형식으로 표시.
-    - 표(table): 표 하단에 반드시 'citation' + 'url' 표시.
-    - 차트·대시보드·시각화: 반드시 'citation' 필드 값을 footer에 표시 (URL은 시각화 내부엔 생략).
+    [출처 표시 — 필수, 예외 없음] 출력 형식에 따라 아래 필드를 사용하라.
+    - 텍스트·요약·분석·표: 반드시 'citation_full' 필드를 그대로 출력 (URL 포함).
+    - 차트·대시보드·시각화: 'citation' 필드만 footer에 표시 (URL은 시각화 내부엔 생략).
     org_id·tbl_id 같은 내부 식별자는 사용자에게 노출하지 말 것."""
     client = _get_client()
     data = await client.get_statistics_data(
@@ -266,6 +265,7 @@ async def kosis_analyze(
         "source": "국가데이터처 KOSIS",
         "citation": f"출처: 국가데이터처 KOSIS 「{title}」",
         "url": f"https://kosis.kr/statHtml/statHtml.do?orgId={org_id}&tblId={tbl_id}",
+        "citation_full": f"출처: 국가데이터처 KOSIS 「{title}」 https://kosis.kr/statHtml/statHtml.do?orgId={org_id}&tblId={tbl_id}",
         "chart_hint": {"chart_type": chart_type, "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
         "data": rows[:60],
     }, ensure_ascii=False, separators=(',', ':'))
