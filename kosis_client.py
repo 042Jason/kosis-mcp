@@ -261,7 +261,7 @@ class KosisClient:
                     "jsonVD": "Y",
                     "errMsg": "Y",
                 }
-                resp = await self._client.get(endpoint, params=params, timeout=15.0)
+                resp = await self._client.get(endpoint, params=params, timeout=5.0)
                 if resp.status_code != 200:
                     continue
                 # HTML 응답 = 리다이렉트된 엔드포인트 → 건너뜀
