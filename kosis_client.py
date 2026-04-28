@@ -341,6 +341,33 @@ class KosisClient:
                     resp3.raise_for_status()
                     data = resp3.json()
 
+                # 최종 폴백: 표준 statisticsData.do (매뉴얼 공식 엔드포인트)
+                # objL1=첫번째 dim 코드, itmId=ALL 로 시도
+                if isinstance(data, dict) and data.get("err") == "20" and dim_order:
+                    std_params = {
+                        "method": "getList",
+                        "apiKey": self.api_key,
+                        "orgId": org_id,
+                        "tblId": tbl_id,
+                        "objL1": dim_order[0],
+                        "itmId": "ALL",
+                        "prdSe": prd_se,
+                        "format": "json",
+                        "jsonVD": "Y",
+                        "errMsg": "Y",
+                    }
+                    if start_prd_de:
+                        std_params["startPrdDe"] = start_prd_de
+                    if end_prd_de:
+                        std_params["endPrdDe"] = end_prd_de
+                    if new_est_prd_cnt and not start_prd_de:
+                        std_params["newEstPrdCnt"] = str(new_est_prd_cnt)
+                    resp4 = await self._client.get(
+                        f"{BASE_URL}/statisticsData.do", params=std_params
+                    )
+                    resp4.raise_for_status()
+                    data = resp4.json()
+
         if isinstance(data, dict) and "err" in data:
             raise ValueError(f"KOSIS API error: {data}  request_id: {data.get('request_id', '')}")
         return data if isinstance(data, list) else []
@@ -397,6 +424,12 @@ class KosisClient:
                     return data
         except Exception:
             pass
+
+        # MT_OTITLE(기관별)·MT_GTITLE01(e-지방지표)은 parent_list_id="A" 미지원
+        # → statisticsSearch.do 1차 검색으로 충분하므로 browse fallback 스킵
+        _NO_BROWSE_FALLBACK = {"MT_OTITLE", "MT_GTITLE01"}
+        if vw_cd in _NO_BROWSE_FALLBACK:
+            return []
 
         try:
             top_level = await self.browse_categories(vw_cd=vw_cd, parent_list_id="A")
