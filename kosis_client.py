@@ -143,11 +143,22 @@ INTENT_MAP: dict[str, dict] = {
     # 기관별 (MT_OTITLE) — 기관명 포함 쿼리
     "기관별": {
         "vw_cd": "MT_OTITLE",
-        "keywords": ["통계청", "국토교통부", "보건복지부", "교육부", "고용노동부",
-                     "행정안전부", "농림축산식품부", "산업통상자원부"],
+        "keywords": ["통계청", "국가데이터처", "국토교통부", "보건복지부", "교육부",
+                     "고용노동부", "행정안전부", "농림축산식품부", "산업통상자원부"],
         "topic_keywords": ["기관", "부처", "청", "원", "공단", "공사"],
     },
 }
+
+# 기관명 변경 등 강제 치환 — 검색 키워드 정규화
+# 쿼리/검색어에서 구명칭을 신명칭으로 교체
+_KEYWORD_ALIAS: dict[str, str] = {
+    "통계청": "국가데이터처",
+}
+
+
+def _normalize_keyword(kw: str) -> str:
+    """기관명 변경 등 alias를 적용해 실제 검색어로 변환."""
+    return _KEYWORD_ALIAS.get(kw, kw)
 
 
 def detect_intent(query: str) -> list[dict]:
@@ -159,7 +170,7 @@ def detect_intent(query: str) -> list[dict]:
             matched.append({
                 "intent": intent_key,
                 "vw_cd": config["vw_cd"],
-                "search_keywords": config["keywords"][:3],
+                "search_keywords": [_normalize_keyword(kw) for kw in config["keywords"][:3]],
             })
     if not matched:
         words = [w for w in query.split() if len(w) >= 2][:3]
