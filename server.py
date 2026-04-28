@@ -162,7 +162,7 @@ a{{color:#2563eb}}
   </div>
   <div class="card">
     <h2>Claude 연결 방법</h2>
-    <p style="font-size:.92rem;color:#475569;margin-bottom:12px">Claude 앱 → 설정(Settings) → 통합(Integrations) → 사용자 통합 추가(Add custom integration)</p>
+    <p style="font-size:.92rem;color:#475569;margin-bottom:12px">Claude 앱 → 설정 → 커넥터 → 커스텀 커넥터 추가 → 이름 자유 설정 / URL에 아래 주소 입력</p>
     <code id="cfg">{mcp_url}</code>
   </div>
 </div>
