@@ -341,6 +341,7 @@ class KosisClient:
         start_prd_de: Optional[str] = None,
         end_prd_de: Optional[str] = None,
         new_est_prd_cnt: Optional[int] = 15,
+        breakdown: bool = False,
     ) -> list[dict]:
 
         def _build_params(**extra) -> dict:
@@ -408,8 +409,9 @@ class KosisClient:
             total_codes = resolved.get("total_codes", {})
             retry_extra = {}
             for i in range(1, n_dims + 1):
-                # 집계 코드가 있으면 해당 코드만, 없으면 ALL
-                retry_extra[f"objL{i}"] = total_codes.get(str(i), "ALL")
+                # breakdown=True: ALL (성별·연령별 세분화)
+                # breakdown=False: 집계 코드만 (셀 수 최소화, 기본값)
+                retry_extra[f"objL{i}"] = "ALL" if breakdown else total_codes.get(str(i), "ALL")
             retry_extra["itmId"] = "+".join(itm_ids[:30]) if itm_ids else "ALL"
             retry = _build_params(**retry_extra)
 

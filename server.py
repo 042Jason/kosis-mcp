@@ -206,16 +206,19 @@ async def kosis_analyze(
     prd_se: str = "Y",
     color_field: str = "",
     filter_keyword: str = "",
+    breakdown: bool = False,
 ) -> str:
     """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.
     출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청, 2024년 기관명 변경됨).
-    filter_keyword: 특정 항목만 필터링 (예: "자살", "서울", "50대"). 대용량 표에서 필요한 데이터만 추출."""
+    filter_keyword: 특정 항목만 필터링 (예: "자살", "서울", "50대"). 대용량 표에서 필요한 데이터만 추출.
+    breakdown: False(기본)=집계 합계만 조회(셀 수 최소화), True=성별·연령별 등 전체 세분류 조회(셀 수 증가 주의)."""
     client = _get_client()
     data = await client.get_statistics_data(
         org_id=org_id, tbl_id=tbl_id, prd_se=prd_se,
         start_prd_de=start_year or None,
         end_prd_de=end_year or None,
         new_est_prd_cnt=recent_n,
+        breakdown=breakdown,
     )
     if not data:
         return "데이터가 없습니다."
