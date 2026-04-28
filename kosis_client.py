@@ -177,6 +177,7 @@ class KosisClient:
         self,
         vw_cd: str = "MT_ZTITLE",
         parent_list_id: str = "A",
+        _retries: int = 3,
     ) -> list[dict]:
         params = {
             "method": "getList",
@@ -187,12 +188,26 @@ class KosisClient:
             "jsonVD": "Y",
             "errMsg": "Y",
         }
-        resp = await self._client.get(f"{BASE_URL}/statisticsList.do", params=params)
-        resp.raise_for_status()
-        data = resp.json()
-        if isinstance(data, dict) and "err" in data:
-            raise ValueError(f"KOSIS API error: {data}")
-        return data if isinstance(data, list) else []
+        last_exc: Exception = RuntimeError("browse_categories: no attempts made")
+        for attempt in range(_retries):
+            try:
+                resp = await self._client.get(
+                    f"{BASE_URL}/statisticsList.do",
+                    params=params,
+                    timeout=45.0,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                if isinstance(data, dict) and "err" in data:
+                    raise ValueError(f"KOSIS API error: {data}")
+                return data if isinstance(data, list) else []
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as e:
+                last_exc = e
+                if attempt < _retries - 1:
+                    await asyncio.sleep(1.5 * (attempt + 1))
+            except Exception as e:
+                raise
+        raise last_exc
 
     # ── 2. Fetch item/dimension codes for a table ────────────────────────────
     async def _get_item_codes(self, org_id: str, tbl_id: str) -> list[dict]:
@@ -273,13 +288,18 @@ class KosisClient:
                         dim_items[obj_id] = []
                     if itmc_id:
                         dim_items[obj_id].append(itmc_id)
-                # Rebuild params: objL{n} = first ITMC_ID of dimension n
-                params.pop("objL1", None)
-                params.pop("objL2", None)
-                params.pop("objL3", None)
-                for idx, obj_id in enumerate(dim_order[:5], start=1):
+                # Rebuild params: objL{n} = ALL codes of dimension n joined with '+'
+                # KOSIS API: multiple codes → '+' separator (e.g. "11+21+31")
+                # 40,000 cell limit → cap at 30 codes per dimension
+                for k in list(params.keys()):
+                    if k.startswith("objL"):
+                        params.pop(k)
+                for idx, obj_id in enumerate(dim_order[:8], start=1):
                     codes = dim_items.get(obj_id, [])
-                    params[f"objL{idx}"] = codes[0] if codes else obj_id
+                    if codes:
+                        params[f"objL{idx}"] = "+".join(codes[:30])
+                    else:
+                        params[f"objL{idx}"] = obj_id
                 resp2 = await self._client.get(
                     f"{BASE_URL}/Param/statisticsParameterData.do", params=params
                 )
@@ -287,7 +307,7 @@ class KosisClient:
                 data = resp2.json()
                 # If still err 20, retry with OBJ_IDs directly (some tables use dim codes)
                 if isinstance(data, dict) and data.get("err") == "20":
-                    for idx, obj_id in enumerate(dim_order[:5], start=1):
+                    for idx, obj_id in enumerate(dim_order[:8], start=1):
                         params[f"objL{idx}"] = obj_id
                     resp3 = await self._client.get(
                         f"{BASE_URL}/Param/statisticsParameterData.do", params=params
@@ -340,7 +360,7 @@ class KosisClient:
                 "errMsg": "Y",
             }
             resp = await self._client.get(
-                f"{BASE_URL}/statisticsSearch.do", params=params
+                f"{BASE_URL}/statisticsSearch.do", params=params, timeout=30.0
             )
             if resp.status_code == 200:
                 data = resp.json()
@@ -353,11 +373,13 @@ class KosisClient:
             top_level = await self.browse_categories(vw_cd=vw_cd, parent_list_id="A")
         except Exception:
             return []
+        # 동시 요청 5개로 제한 — KOSIS 서버 연결 끊김 방지
+        sem = asyncio.Semaphore(5)
         tasks = []
         for cat in top_level[:15]:
             list_id = cat.get("LIST_ID", "")
             if list_id:
-                tasks.append(self._search_in_category(keyword, vw_cd, list_id))
+                tasks.append(self._search_in_category(keyword, vw_cd, list_id, sem))
         results_nested = await asyncio.gather(*tasks, return_exceptions=True)
         results = []
         for r in results_nested:
@@ -365,9 +387,16 @@ class KosisClient:
                 results.extend(r)
         return results
 
-    async def _search_in_category(self, keyword: str, vw_cd: str, list_id: str) -> list[dict]:
+    async def _search_in_category(
+        self, keyword: str, vw_cd: str, list_id: str,
+        sem: asyncio.Semaphore | None = None,
+    ) -> list[dict]:
         try:
-            children = await self.browse_categories(vw_cd=vw_cd, parent_list_id=list_id)
+            if sem:
+                async with sem:
+                    children = await self.browse_categories(vw_cd=vw_cd, parent_list_id=list_id)
+            else:
+                children = await self.browse_categories(vw_cd=vw_cd, parent_list_id=list_id)
             return [
                 item for item in children
                 if keyword in item.get("TBL_NM", "") and item.get("TBL_ID")
