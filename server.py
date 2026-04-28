@@ -216,7 +216,8 @@ async def kosis_analyze(
     출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청, 2024년 기관명 변경됨).
     filter_keyword: 특정 항목만 필터링 (예: "자살", "서울", "50대"). 대용량 표에서 필요한 데이터만 추출.
     breakdown: False(기본)=집계 합계만 조회(셀 수 최소화), True=성별·연령별 등 전체 세분류 조회(셀 수 증가 주의).
-    [출력 규칙] 사용자에게 데이터 출처를 안내할 때는 'title' 파라미터로 전달한 통계표명을 사용하라. org_id·tbl_id 같은 내부 식별자는 사용자에게 노출하지 말 것."""
+    [출력 규칙] 사용자에게 데이터 출처를 안내할 때는 'title' 파라미터로 전달한 통계표명을 사용하라. org_id·tbl_id 같은 내부 식별자는 사용자에게 노출하지 말 것.
+    [시각화 규칙] 차트·대시보드를 생성할 때는 반드시 응답의 'citation' 필드 값을 차트 하단(footer)에 표시하라. 예: "출처: 국가데이터처 KOSIS 「월별 자살 사망자 수」". 여러 표를 사용한 경우 각 차트마다 해당 citation을 개별 표시할 것."
     client = _get_client()
     data = await client.get_statistics_data(
         org_id=org_id, tbl_id=tbl_id, prd_se=prd_se,
@@ -245,8 +246,9 @@ async def kosis_analyze(
         "title": title, "org_id": org_id, "tbl_id": tbl_id,
         "unit": unit, "rows": len(rows), "summary": summary,
         "source": "국가데이터처 KOSIS",
+        "citation": f"출처: 국가데이터처 KOSIS 「{title}」",
         "chart_hint": {"chart_type": chart_type, "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
-        "data": rows[:100],  # 필터링 후 최대 100행
+        "data": rows[:100],
     }, ensure_ascii=False, indent=2)
 
 
