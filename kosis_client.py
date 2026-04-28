@@ -353,7 +353,10 @@ class KosisClient:
         end_prd_de: Optional[str] = None,
         new_est_prd_cnt: Optional[int] = 15,
         breakdown: bool = False,
+        expand_c1: bool = False,
     ) -> list[dict]:
+        # expand_c1=True: C1(첫 번째 차원)만 ALL, 나머지는 "계" 집계 코드
+        # → filter_keyword 사용 시 원인명·항목명이 C1_NM에 나타나도록 하기 위해 사용
 
         def _build_params(**extra) -> dict:
             """공통 파라미터 베이스 생성."""
@@ -420,9 +423,15 @@ class KosisClient:
             total_codes = resolved.get("total_codes", {})
             retry_extra = {}
             for i in range(1, n_dims + 1):
-                # breakdown=True: ALL (성별·연령별 세분화)
-                # breakdown=False: 집계 코드만 (셀 수 최소화, 기본값)
-                retry_extra[f"objL{i}"] = "ALL" if breakdown else total_codes.get(str(i), "ALL")
+                # breakdown=True  : 모든 차원 ALL (성별·연령별 전체 세분화)
+                # expand_c1=True  : C1만 ALL, 나머지는 "계" (filter_keyword용 — 원인명 행 노출)
+                # 기본(False/False): 모든 차원 "계" 집계 코드 (셀 수 최소화)
+                if breakdown:
+                    retry_extra[f"objL{i}"] = "ALL"
+                elif expand_c1 and i == 1:
+                    retry_extra[f"objL{i}"] = "ALL"
+                else:
+                    retry_extra[f"objL{i}"] = total_codes.get(str(i), "ALL")
             retry_extra["itmId"] = "+".join(itm_ids[:30]) if itm_ids else "ALL"
             retry = _build_params(**retry_extra)
 

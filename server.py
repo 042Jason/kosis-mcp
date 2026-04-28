@@ -224,6 +224,7 @@ async def kosis_analyze(
         end_prd_de=end_year or None,
         new_est_prd_cnt=recent_n,
         breakdown=breakdown,
+        expand_c1=bool(filter_keyword),  # filter_keyword 지정 시 C1 차원 전체 펼침
     )
     if not data:
         return "데이터가 없습니다."
