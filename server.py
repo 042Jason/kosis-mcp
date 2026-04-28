@@ -162,7 +162,10 @@ a{{color:#2563eb}}
   </div>
   <div class="card">
     <h2>Claude 연결 방법</h2>
-    <p style="font-size:.92rem;color:#475569;margin-bottom:12px">Claude 앱 → 설정 → 커넥터 → 커스텀 커넥터 추가 → 이름 자유 설정 / URL에 아래 주소 입력</p>
+    <p style="font-size:.92rem;color:#475569;margin-bottom:12px">
+      ① 위 <b>접속 URL 생성</b>에서 인증키를 입력해 URL을 생성하세요.<br>
+      ② Claude 앱 → 설정 → 커넥터 → 커스텀 커넥터 추가 → 이름 자유 설정 / URL에 생성된 주소 붙여넣기
+    </p>
     <code id="cfg">{mcp_url}</code>
   </div>
 </div>
