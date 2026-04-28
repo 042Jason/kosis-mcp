@@ -3,6 +3,7 @@ KOSIS MCP Server - FastMCP + Streamable HTTP (MCP 2025-03-26)
 """
 
 import asyncio
+import re
 import contextvars
 import json
 import os
@@ -223,6 +224,7 @@ async def kosis_analyze(
     color_field: str = "",
     filter_keyword: str = "",
     breakdown: bool = False,
+    extra_tbl_ids: str = "",
 ) -> str:
     """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.
     출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청 — 2025년 국가데이터처로 기관명 변경).
@@ -230,50 +232,109 @@ async def kosis_analyze(
       예) "자살" → 자살 포함 행만 / "대전 서구" → 대전+서구 모두 포함 행만 (전국 서구 중복 해소).
       지역명 중복이 있는 경우 반드시 상위+하위 지역명을 함께 입력하라 (예: "부산 중구", "서울 중구").
     breakdown: False(기본)=집계 합계만 조회(셀 수 최소화), True=성별·연령별 등 전체 세분류 조회(셀 수 증가 주의).
+    extra_tbl_ids: 작성방식 변경으로 시계열이 여러 표로 분리된 경우, 연속 시계열 구성을 위해
+      추가로 병합할 tbl_id를 쉼표로 구분해 전달. 예) "DT_3KB9001_OLD,DT_3KB9001_V2"
+      org_id는 tbl_id와 동일한 것으로 가정. 시간순 정렬 후 병합되며 주 표(tbl_id)의 데이터가 중복 연도에서 우선.
+      [사용 시점] kosis_browse에서 '(YYYY~)' 패턴의 형제 카테고리가 발견되거나, 조회 데이터 coverage가
+      사용자 요청 기간을 충족하지 못할 때 이 파라미터로 이전 방법론 표를 병합하라.
     [출처 표시 — 필수, 예외 없음] 출력 형식에 따라 아래 필드를 사용하라.
     - 텍스트·요약·분석·표: 반드시 'citation_full' 필드를 그대로 출력 (URL 포함).
     - 차트·대시보드·시각화: 'citation' 필드만 footer에 표시 (URL은 시각화 내부엔 생략).
     org_id·tbl_id 같은 내부 식별자는 사용자에게 노출하지 말 것."""
     client = _get_client()
-    data = await client.get_statistics_data(
-        org_id=org_id, tbl_id=tbl_id, prd_se=prd_se,
-        start_prd_de=start_year or None,
-        end_prd_de=end_year or None,
-        new_est_prd_cnt=recent_n,
-        breakdown=breakdown,
-        expand_c1=bool(filter_keyword),  # 필터 지정 시 C1 차원 전체 펼침
-    )
-    if not data:
+
+    # 주 표 + extra 표 병렬 조회
+    extra_ids = [eid.strip() for eid in extra_tbl_ids.split(",") if extra_tbl_ids and eid.strip()]
+    all_table_pairs = [(org_id, tbl_id)] + [(org_id, eid) for eid in extra_ids]
+
+    async def _fetch(oid: str, tid: str) -> list:
+        try:
+            return await client.get_statistics_data(
+                org_id=oid, tbl_id=tid, prd_se=prd_se,
+                start_prd_de=start_year or None,
+                end_prd_de=end_year or None,
+                new_est_prd_cnt=recent_n,
+                breakdown=breakdown,
+                expand_c1=bool(filter_keyword),
+            )
+        except Exception:
+            return []
+
+    all_raw = await asyncio.gather(*[_fetch(oid, tid) for oid, tid in all_table_pairs])
+
+    # 시계열 병합: 주 표(index=0) 데이터의 PRD_DE 집합을 먼저 등록 후 extra는 보완
+    primary_data = list(all_raw[0]) if all_raw else []
+    extra_data_list = list(all_raw[1:]) if len(all_raw) > 1 else []
+
+    if extra_data_list:
+        # PRD_DE를 기준으로 주 표에 없는 기간만 extra에서 추가
+        # (완전 중복 제거: 동일 PRD_DE+ITM_NM+C1_NM 조합)
+        primary_keys: set[str] = set()
+        for row in primary_data:
+            key = f"{row.get('PRD_DE','')}__{row.get('ITM_NM','')}__{row.get('C1_NM','')}"
+            primary_keys.add(key)
+
+        supplemental: list[dict] = []
+        for extra_data in extra_data_list:
+            for row in (extra_data or []):
+                key = f"{row.get('PRD_DE','')}__{row.get('ITM_NM','')}__{row.get('C1_NM','')}"
+                if key not in primary_keys:
+                    supplemental.append(row)
+                    primary_keys.add(key)
+
+        merged_raw = supplemental + primary_data  # extra(구 데이터)가 앞에 → 정렬 후 연속 시계열
+        merged_raw.sort(key=lambda r: r.get("PRD_DE", ""))
+    else:
+        merged_raw = primary_data
+
+    if not merged_raw:
         return "데이터가 없습니다."
+
     cf = color_field or None
     if not cf:
         for c in ("ITM_NM", "C1_NM", "C2_NM"):
-            if c in set(data[0].keys()):
+            if c in set(merged_raw[0].keys()):
                 cf = c
                 break
-    rows, summary, unit = _process_data(data, cf)
-    # filter_keyword 필터링 — 공백 구분 시 모든 단어 AND 매칭 (예: "대전 서구" → 대전 AND 서구)
+    rows, summary, unit = _process_data(merged_raw, cf)
+
+    # filter_keyword 필터링 — 공백 구분 시 모든 단어 AND 매칭
     if filter_keyword:
         filter_cols = [k for k in (rows[0].keys() if rows else [])
                        if k.endswith("_NM") or k == "ITM_NM"]
         terms = [t.lower() for t in filter_keyword.split() if t]
         rows = [r for r in rows
                 if all(any(t in str(r.get(c, "")).lower() for c in filter_cols) for t in terms)]
-    return json.dumps({
-        "title": title, "org_id": org_id, "tbl_id": tbl_id,
-        "unit": unit, "rows": len(rows), "summary": summary,
+
+    # 데이터 coverage (시계열 범위) 계산
+    prd_values = [r.get("PRD_DE", "") for r in rows if r.get("PRD_DE")]
+    coverage = {"from": min(prd_values), "to": max(prd_values)} if prd_values else {}
+
+    merged_info = [tbl_id] + extra_ids if extra_ids else None
+
+    result: dict = {
+        "title": title, "unit": unit, "rows": len(rows), "summary": summary,
+        "coverage": coverage,
         "source": "국가데이터처 KOSIS",
         "citation": f"출처: 국가데이터처 KOSIS 「{title}」",
         "url": f"https://kosis.kr/statHtml/statHtml.do?orgId={org_id}&tblId={tbl_id}",
         "citation_full": f"출처: 국가데이터처 KOSIS 「{title}」 https://kosis.kr/statHtml/statHtml.do?orgId={org_id}&tblId={tbl_id}",
         "chart_hint": {"chart_type": chart_type, "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
         "data": rows[:60],
-    }, ensure_ascii=False, separators=(',', ':'))
+    }
+    if merged_info:
+        result["merged_tables"] = merged_info
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
 
 
 @mcp.tool()
 async def kosis_browse(vw_cd: str = "MT_ZTITLE", parent_list_id: str = "A") -> str:
-    """KOSIS 카테고리 트리를 탐색합니다. vw_cd: MT_ZTITLE(주제별) MT_TM1_TITLE(대상별) MT_TM2_TITLE(이슈별)"""
+    """KOSIS 카테고리 트리를 탐색합니다. vw_cd: MT_ZTITLE(주제별) MT_TM1_TITLE(대상별) MT_TM2_TITLE(이슈별)
+    [시계열 분리 감지] sub_categories에 'methodology_split: true' 표시된 항목들은 동일 지표가
+    작성방식 변경으로 기간별로 분리된 구조입니다. 연속 시계열이 필요하면:
+      1. 각 하위 카테고리를 kosis_browse로 탐색해 tbl_id 목록 확인
+      2. kosis_analyze 호출 시 최신 표를 tbl_id로, 이전 표들을 extra_tbl_ids로 전달
+    """
     client = _get_client()
     result = await client.browse_categories(vw_cd=vw_cd, parent_list_id=parent_list_id)
     tables = [{"org_id": r.get("ORG_ID"), "tbl_id": r.get("TBL_ID"),
@@ -281,7 +342,25 @@ async def kosis_browse(vw_cd: str = "MT_ZTITLE", parent_list_id: str = "A") -> s
               for r in result if r.get("TBL_ID")]
     cats = [{"list_id": r.get("LIST_ID"), "name": r.get("LIST_NM")}
             for r in result if r.get("LIST_ID") and not r.get("TBL_ID")]
-    return json.dumps({"sub_categories": cats, "tables": tables[:30]}, ensure_ascii=False, separators=(',', ':'))
+
+    # 방법론 분리 감지: "(YYYY~)" 또는 "YYYY년~" 패턴이 있는 형제 카테고리들
+    _year_range_re = re.compile(r'[(\s](\d{4})[년~]')
+    year_tagged = [c for c in cats if _year_range_re.search(c.get("name", ""))]
+    if len(year_tagged) >= 2:
+        for c in year_tagged:
+            c["methodology_split"] = True
+        split_note = (
+            "이 카테고리는 작성방식 변경으로 시계열이 분리되어 있습니다. "
+            "연속 시계열 조회 시 각 하위 카테고리를 kosis_browse로 탐색 후 "
+            "kosis_analyze의 extra_tbl_ids 파라미터로 이전 표를 병합하세요."
+        )
+    else:
+        split_note = None
+
+    response: dict = {"sub_categories": cats, "tables": tables[:30]}
+    if split_note:
+        response["split_note"] = split_note
+    return json.dumps(response, ensure_ascii=False, separators=(',', ':'))
 
 
 @mcp.tool()
@@ -374,11 +453,4 @@ class _ApiKeyMiddleware:
             finally:
                 _api_key_ctx.reset(token)
         else:
-            await self._app(scope, receive, send)
-
-
-starlette_app = _ApiKeyMiddleware(_fastmcp_app)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port, log_level="info")
+            await self._app
