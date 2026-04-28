@@ -81,7 +81,7 @@ def _process_data(data: list, color_field=None):
 # ---------------------------------------------------------------------------
 # FastMCP 인스턴스
 # ---------------------------------------------------------------------------
-mcp = FastMCP("kosis-mcp")
+mcp = FastMCP("kosis-mcp", host="0.0.0.0")
 
 
 # ---------------------------------------------------------------------------
@@ -336,4 +336,4 @@ starlette_app = _ApiKeyMiddleware(_fastmcp_app)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port)
+    uvicorn.run(starlette_app, host="0.0.0
