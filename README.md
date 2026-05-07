@@ -143,21 +143,21 @@ https://kosis-mcp-production.up.railway.app/mcp?kosis_key=발급받은_인증키
 
 | 도구 | 설명 |
 |------|------|
-| `kosis_quick` | **표 이름 + 기간이 명확한 경우** 검색·데이터 조회를 1회 호출로 처리 (원스텝) |
 | `kosis_find_by_intent` | 자연어 의도 → 관련 통계표 자동 탐색 + KOSIS 직접 링크 제공 |
+| `kosis_browse` | KOSIS 카테고리 트리 직접 탐색 (특정 통계조사 접근 시 권장) |
 | `kosis_analyze` | 통계 데이터 조회 후 Claude에게 전달 (Claude가 차트 생성) |
 | `kosis_dashboard` | 여러 통계를 한꺼번에 조회 (Claude가 대시보드로 시각화) |
-| `kosis_browse` | KOSIS 카테고리 트리 탐색 |
+| `kosis_combine` | 여러 표 데이터를 연도 기준으로 결합·비율 계산 |
 | `kosis_explain` | 통계표 조사 목적·주기·대상 범위 조회 |
 
 ### 도구 선택 기준
 
 | 사용자 요청 | 선택 도구 | 이유 |
 |-------------|-----------|------|
-| "프랜차이즈통계 5개년치 줘" | `kosis_quick` | 표명 + 기간 모두 명확 → 원스텝 처리 |
-| "합계출산율 2015~2024 꺾은선" | `kosis_quick` | 표명 + 연도 범위 명확 → 원스텝 처리 |
-| "저출산 관련 통계 뭐가 있어?" | `kosis_find_by_intent` | 의도만 있고 표명 미지정 → 탐색 필요 |
-| "청년 고용·주거 대시보드" | `kosis_find_by_intent` → `kosis_dashboard` | 다중 표 종합 필요 |
+| "저출산 관련 통계 뭐가 있어?" | `kosis_find_by_intent` | 주제 기반 → 자동 탐색 |
+| "광업제조업조사 사업체수·출하액" | `kosis_browse` (L_5) | 고유 조사명 → 카테고리 직접 탐색 |
+| "서비스업조사 매출액 5년치" | `kosis_browse` (O_8) → `kosis_analyze` | 조사명 + 데이터 조회 |
+| "청년 고용·주거 대시보드" | `kosis_find_by_intent` → `kosis_dashboard` | 다중 표 종합 |
 | "이 통계표 어떤 조사야?" | `kosis_explain` | 메타데이터 조회 |
 
 ---
@@ -170,30 +170,28 @@ flowchart TD
 
     B --> C{질의 유형}
 
-    C -->|"표명 + 기간 명시\n예: 프랜차이즈통계 5개년치"| D["kosis_quick\n원스텝 조회"]
     C -->|"주제·의도 기반\n예: 청년 고용 관련 통계"| E["kosis_find_by_intent\n의도 기반 탐색"]
-    C -->|"카테고리 직접 탐색"| F["kosis_browse\n카테고리 탐색"]
-
-    D --> R["📦 데이터 반환\n검색 + 조회 1회 완료"]
+    C -->|"특정 통계조사명\n예: 광업제조업조사·서비스업조사"| F["kosis_browse\n카테고리 직접 탐색"]
 
     E --> G{결과 활용}
     F --> G
 
-    G -->|"단일 표 분석"| H["kosis_analyze\n데이터 조회"]
+    G -->|"단일 표 분석"| H["kosis_analyze\nbreakdown=True"]
     G -->|"다중 표 종합"| I["kosis_dashboard\n멀티 테이블 조회"]
+    G -->|"여러 표 결합·비율"| J["kosis_combine\n표 JOIN + 비율 계산"]
 
     H -->|"메타데이터 필요 시"| K["kosis_explain\n통계표 설명 조회"]
 
     H --> V["🤖 Claude 분석·시각화"]
     I --> V
-    R --> V
+    J --> V
     K --> V
 
     V --> Z["📈 차트 / 리포트 / 대시보드\n출처: 국가데이터처 KOSIS 자동 첨부"]
 ```
 
-> `kosis_quick`은 표명과 기간이 모두 명확할 때 기존 2단계 플로우를 단일 호출로 단축합니다.  
-> 주제만 있고 표명이 불분명한 경우에는 `kosis_find_by_intent`가 최적 경로입니다.
+> 특정 통계조사명(광업제조업조사·서비스업조사 등)은 `kosis_browse`로 카테고리를 직접 탐색하는 것이 가장 정확합니다.  
+> 주제·의도 기반 탐색에는 `kosis_find_by_intent`, 데이터 조회에는 `kosis_analyze(breakdown=True)`를 사용하세요.
 
 ---
 
@@ -296,23 +294,21 @@ KOSIS는 통계 작성방식이 바뀌면 기존 표를 유지하고 새 표를 
 → 응답에 `coverage` 필드(실제 시계열 범위)와 `merged_tables` 필드(병합 표 목록) 포함  
 → 중복 연도는 주 표(`tbl_id`) 데이터 우선 적용
 
-### 원스텝 조회 도구 — `kosis_quick`
+### 카테고리 직접 탐색 — `kosis_browse`
 
-표 이름과 기간이 명확한 쿼리에서 기존 2단계 플로우(`kosis_find_by_intent` → `kosis_analyze`)를 단일 호출로 압축합니다.
+`kosis_find_by_intent`가 고유 조사명(광업제조업조사·서비스업조사 등)에서 적중률이 낮은 문제를 해결하기 위해, 카테고리 코드를 직접 지정해 트리를 탐색하는 방식을 권장합니다.
 
-**자동 처리 내용**:
+**주요 카테고리 코드 (MT_ZTITLE 기준)**:
 
-| 입력 표현 | 파싱 결과 |
-|-----------|-----------|
-| "5개년치", "5개년" | `recent_n=5` |
-| "최근 3년" | `recent_n=3` |
-| "최근 6개월" | `recent_n=6, prd_se="M"` (월간 자동 전환) |
-| "2019~2024" | `start_year=2019, end_year=2024` |
-| "2020년 이후" | `start_year=2020` |
+| 코드 | 해당 조사 |
+|------|-----------|
+| `L_5` | 광업제조업조사 (사업체수·종사자수·출하액) |
+| `O_8` | 서비스업조사 (도소매·숙박·음식·서비스업 매출액) |
+| `I` | 기업·산업 전반 |
+| `Q` | 국민계정·경기·기업경영 |
+| `A` | 인구·가구 / `C` 노동·임금 / `F` 보건·의료 |
 
-- 기간 표현 제거 후 KOSIS 키워드 검색 ("프랜차이즈통계" → "프랜차이즈" 검색)
-- 상위 매칭 표에서 데이터 즉시 조회
-- `other_candidates` 필드로 유사 표 2~3개 함께 안내
+트리를 끝까지 내려간 뒤 이름에 **"총괄"·"주요지표"** 가 포함된 표를 선택하고, 분류 개정으로 표가 분리된 경우 `kosis_analyze`의 `extra_tbl_ids`로 이전 표를 병합해 연속 시계열을 구성합니다.
 
 ### 내부 로직 개선
 
@@ -330,15 +326,5 @@ KOSIS는 통계 작성방식이 바뀌면 기존 표를 유지하고 새 표를 
 
 ```
 kosis-mcp/
-├── server.py          # MCP 서버 (Streamable HTTP, 6개 도구)
-├── kosis_client.py    # KOSIS OpenAPI 클라이언트 + 의도 탐지
-├── requirements.txt   # Python 의존성
-├── Dockerfile         # Railway 배포용
-└── railway.toml       # Railway 설정
-```
-
----
-
-## 📄 라이선스
-
-MIT License · 데이터 출처: [국가데이터처 KOSIS](https://kosis.kr)
+├── server.py          # MCP 서버 (Streamable HTTP, 6개 도구: find_by_intent·browse·analyze·dashboard·combine·explain)
+├── kosis_client.py    # KOSIS OpenAPI �
