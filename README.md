@@ -142,11 +142,20 @@ https://kosis-mcp-production.up.railway.app/mcp?kosis_key=발급받은_인증키
 
 | 도구 | 설명 |
 |------|------|
+| `kosis_quick` | **표 이름 + 기간이 명확한 경우** 검색·데이터 조회를 1회 호출로 처리 (원스텝) |
 | `kosis_find_by_intent` | 자연어 의도 → 관련 통계표 자동 탐색 + KOSIS 직접 링크 제공 |
 | `kosis_analyze` | 통계 데이터 조회 후 Claude에게 전달 (Claude가 차트 생성) |
 | `kosis_dashboard` | 여러 통계를 한꺼번에 조회 (Claude가 대시보드로 시각화) |
 | `kosis_browse` | KOSIS 카테고리 트리 탐색 |
 | `kosis_explain` | 통계표 조사 목적·주기·대상 범위 조회 |
+
+`kosis_quick` 사용 예시:
+
+| 사용자 요청 | 처리 흐름 |
+|---|---|
+| "프랜차이즈통계 5개년치 줘" | `kosis_quick` 1회 호출 → 즉시 데이터 반환 |
+| "합계출산율 2015~2024 꺾은선" | `kosis_quick` 1회 호출 → 즉시 데이터 반환 |
+| "저출산 관련 통계 뭐가 있어?" | `kosis_find_by_intent` → 표 목록 탐색 |
 
 ---
 
@@ -243,6 +252,16 @@ KOSIS는 통계 작성방식이 바뀌면 기존 표를 유지하고 새 표를 
 → `kosis_analyze`에 `extra_tbl_ids` 파라미터 추가: 이전 방법론 표 ID를 쉼표로 전달하면 병렬 조회 후 연도순 자동 병합  
 → 응답에 `coverage` 필드(실제 시계열 범위)와 `merged_tables` 필드(병합된 표 목록) 포함  
 → 중복 연도는 주 표(`tbl_id`) 데이터 우선 적용
+
+### 원스텝 조회 도구 추가 — `kosis_quick`
+
+표 이름과 기간이 명확한 쿼리에서 기존 2단계 플로우(`kosis_find_by_intent` → `kosis_analyze`)를 단일 호출로 압축합니다.
+
+**자동 처리 내용**:
+- 자연어 기간 표현 파싱: "5개년치" → `recent_n=5`, "최근 3년" → `recent_n=3`, "2019~2024" → `start/end` 설정, "최근 6개월" → 월간 데이터 자동 전환
+- 검색어에서 기간 표현 제거 후 KOSIS 키워드 검색 ("프랜차이즈통계" → "프랜차이즈" 검색)
+- 상위 매칭 표에서 데이터 즉시 조회
+- `other_candidates` 필드로 유사 표 2~3개 함께 안내
 
 ### 내부 로직 개선 (4차)
 

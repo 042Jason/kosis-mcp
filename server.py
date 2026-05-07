@@ -86,6 +86,38 @@ def _process_data(data: list, color_field=None):
 # 표 이름에서 수록기간 힌트 파싱용 정규식 (매 요청마다 재컴파일 방지)
 _PERIOD_RE = re.compile(r'[(\s](\d{4})[–\-~](\d{4})?')
 
+# ── kosis_quick: 자연어 기간 파싱 ──────────────────────────────────────────
+_TIME_RE_PATTERNS = [
+    (re.compile(r'(\d+)\s*개?년치'),        lambda m: {"recent_n": int(m.group(1))}),
+    (re.compile(r'(\d+)\s*개년'),           lambda m: {"recent_n": int(m.group(1))}),
+    (re.compile(r'최근\s*(\d+)\s*개?년'),  lambda m: {"recent_n": int(m.group(1))}),
+    (re.compile(r'최근\s*(\d+)\s*개?월'),  lambda m: {"recent_n": int(m.group(1)), "prd_se": "M"}),
+    (re.compile(r'(\d{4})\s*년?\s*(?:부터|이후)'), lambda m: {"start_year": m.group(1)}),
+    (re.compile(r'(\d{4})\s*[~\-]\s*(\d{4})'),  lambda m: {"start_year": m.group(1), "end_year": m.group(2)}),
+]
+
+_QUICK_STOPWORDS = {
+    "통계", "자료", "데이터", "줘", "알려줘", "보여줘", "찾아줘", "가져다줘",
+    "한국", "대한민국", "전국", "현황", "분석", "조회", "결과", "관련", "좀",
+}
+
+
+def _parse_quick_query(query: str) -> tuple[dict, str]:
+    """자연어 쿼리에서 기간 파라미터와 KOSIS 검색 키워드를 분리."""
+    time_params: dict = {}
+    cleaned = query
+    for pattern, extractor in _TIME_RE_PATTERNS:
+        m = pattern.search(cleaned)
+        if m:
+            time_params.update(extractor(m))
+            cleaned = pattern.sub("", cleaned).strip()
+    tokens = [t for t in cleaned.split() if len(t) >= 2 and t not in _QUICK_STOPWORDS]
+    kw = tokens[0] if tokens else cleaned[:8]
+    # "프랜차이즈통계" → "프랜차이즈" (접미 '통계' 제거 → KOSIS searchNm 정확도 향상)
+    if kw.endswith("통계") and len(kw) > 2:
+        kw = kw[:-2]
+    return time_params, kw
+
 mcp = FastMCP("kosis-mcp", host="0.0.0.0")
 
 
@@ -420,6 +452,105 @@ async def kosis_explain(org_id: str, tbl_id: str) -> str:
     key_fields = {"TBL_NM", "STAT_NM", "CYCLE", "SURVEY_PURPOSE", "SURVEY_RANGE", "CONTACT_ORG"}
     compact = [{k: v for k, v in row.items() if k in key_fields or not k.endswith("_CD")} for row in data]
     return json.dumps(compact[:5], ensure_ascii=False, separators=(',', ':'))
+
+
+@mcp.tool()
+async def kosis_quick(query: str) -> str:
+    """표 이름 + 기간이 명확한 쿼리를 한 번의 호출로 처리합니다 (검색 + 데이터 조회 원스텝).
+
+    [사용 시점] 다음 조건을 **모두** 충족할 때 이 도구를 사용하라:
+      ① 사용자가 특정 통계표 이름·주제를 명시했고 (예: "프랜차이즈통계", "합계출산율", "소비자물가지수")
+      ② 기간도 함께 지정했을 때 (예: "5개년치", "최근 3년", "2019~2024", "2015년부터")
+    조건 ①만 있거나 주제가 모호하면 kosis_find_by_intent를 사용하라.
+
+    [자동 처리 내용]
+      - 기간 표현 파싱: "5개년치"→recent_n=5, "최근 3년"→recent_n=3, "2019~2024"→start/end 설정
+      - 검색어 추출 후 KOSIS 통계표 검색
+      - 상위 매칭 표에서 데이터 즉시 조회
+      - other_candidates 필드로 유사 표 2~3개 추가 안내
+
+    [출처 표시 — 필수] citation_full 필드를 반드시 출력할 것."""
+    client = _get_client()
+
+    # 1. 기간 파싱 + 검색 키워드 추출
+    time_params, search_kw = _parse_quick_query(query)
+    recent_n  = time_params.get("recent_n", 10)
+    start_year = time_params.get("start_year", "")
+    end_year   = time_params.get("end_year", "")
+    prd_se     = time_params.get("prd_se", "Y")
+
+    # 2. KOSIS 검색 (원래 키워드로 먼저, 결과 없으면 "통계" 미제거 원형으로 재시도)
+    results = await client.search_statistics(keyword=search_kw)
+    if not results:
+        # 원형 키워드로 재시도
+        raw_tokens = [t for t in query.split() if len(t) >= 2 and t not in _QUICK_STOPWORDS]
+        raw_kw = raw_tokens[0] if raw_tokens else search_kw
+        if raw_kw != search_kw:
+            results = await client.search_statistics(keyword=raw_kw)
+
+    if not results:
+        return json.dumps(
+            {"error": f"'{search_kw}' 관련 통계표를 찾을 수 없습니다. kosis_find_by_intent로 탐색해보세요."},
+            ensure_ascii=False, separators=(',', ':'),
+        )
+
+    # 3. 상위 결과에서 데이터 즉시 조회
+    top = results[0]
+    org_id = top.get("ORG_ID", "")
+    tbl_id = top.get("TBL_ID", "")
+    tbl_nm = _normalize_output(top.get("TBL_NM", ""))
+
+    try:
+        data = await client.get_statistics_data(
+            org_id=org_id, tbl_id=tbl_id,
+            prd_se=prd_se,
+            start_prd_de=start_year or None,
+            end_prd_de=end_year or None,
+            new_est_prd_cnt=recent_n,
+        )
+    except Exception as e:
+        return json.dumps({"error": str(e), "matched_table": tbl_nm}, ensure_ascii=False, separators=(',', ':'))
+
+    if not data:
+        return json.dumps({"error": "데이터가 없습니다.", "matched_table": tbl_nm}, ensure_ascii=False, separators=(',', ':'))
+
+    cf = None
+    for c in ("ITM_NM", "C1_NM", "C2_NM"):
+        if data and c in data[0]:
+            cf = c
+            break
+    rows, summary, unit = _process_data(data, cf)
+
+    prd_values = [r.get("PRD_DE", "") for r in rows if r.get("PRD_DE")]
+    coverage = {"from": min(prd_values), "to": max(prd_values)} if prd_values else {}
+    url = f"https://kosis.kr/statHtml/statHtml.do?orgId={org_id}&tblId={tbl_id}"
+
+    # 4. 유사 후보 표 (2위~4위) — 사용자 확인용
+    other_candidates = [
+        {
+            "name": _normalize_output(r.get("TBL_NM", "")),
+            "url": f"https://kosis.kr/statHtml/statHtml.do?orgId={r.get('ORG_ID','')}&tblId={r.get('TBL_ID','')}",
+        }
+        for r in results[1:4] if r.get("TBL_ID")
+    ]
+
+    result: dict = {
+        "query": query,
+        "matched_table": tbl_nm,
+        "unit": unit,
+        "rows": len(rows),
+        "summary": summary,
+        "coverage": coverage,
+        "source": "국가데이터처 KOSIS",
+        "citation": f"출처: 국가데이터처 KOSIS 「{tbl_nm}」",
+        "url": url,
+        "citation_full": f"출처: 국가데이터처 KOSIS 「{tbl_nm}」 {url}",
+        "chart_hint": {"chart_type": "line", "x_field": "PRD_DE", "y_field": "DT", "color_field": cf},
+        "data": rows[:60],
+    }
+    if other_candidates:
+        result["other_candidates"] = other_candidates
+    return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
 
 
 @mcp.tool()
