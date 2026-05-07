@@ -1,6 +1,10 @@
 # 환경변수 (절대 올리지 마세요 — API 키 포함)
 .env
 
+# Cowork 로컬 전용 파일 (GitHub에 올리지 않음)
+API.txt
+deploy.sh
+
 # Python
 __pycache__/
 *.pyc
@@ -14,15 +18,4 @@ build/
 venv/
 
 # 생성된 차트 파일
-kosis_charts/
-*.png
-*.html
-
-# IDE
-.vscode/
-.idea/
-*.swp
-
-# OS
-.DS_Store
-Thumbs.db
+kosi
