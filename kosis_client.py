@@ -293,6 +293,26 @@ def _strip_particle(token: str) -> str:
 _FALLBACK_VW_CDS = ["MT_ZTITLE", "MT_TM1_TITLE", "MT_TM2_TITLE"]
 
 
+
+_SEARCH_STOPWORDS = {
+    "통계", "자료", "데이터", "현황", "관련", "분석", "조회", "결과",
+    "있어", "줘", "알려", "보여", "찾아", "한국", "대한민국", "전국",
+}
+
+def _score_tbl(tbl_nm: str, query_tokens: set) -> float:
+    """표명(TBL_NM)과 쿼리 토큰의 겹침 점수 (0.0 ~ 1.0).
+    매칭 토큰이 많을수록, 표명이 짧을수록(정확도 높을수록) 높은 점수."""
+    if not tbl_nm or not query_tokens:
+        return 0.0
+    nm = tbl_nm.lower()
+    matched = [t for t in query_tokens if len(t) >= 2 and t in nm]
+    if not matched:
+        return 0.0
+    # 겹친 토큰 수 / 전체 쿼리 토큰 수 (recall) * 겹친 토큰 수 / 표명 글자 수 (precision proxy)
+    recall    = len(matched) / max(len(query_tokens), 1)
+    precision = sum(len(t) for t in matched) / max(len(tbl_nm), 1)
+    return round((recall + precision) / 2, 4)
+
 def detect_intent(query: str) -> list[dict]:
     matched = []
     query_lower = query.lower()
@@ -710,6 +730,34 @@ class KosisClient:
                 results.extend(r)
         return results
 
+
+    async def search_statistics_global(self, keyword: str) -> list[dict]:
+        """vw_cd 없이 KOSIS 전체 카탈로그에서 키워드 검색.
+        기관 무관하게 모든 통계표를 대상으로 함."""
+        try:
+            params = {
+                "method": "getList",
+                "apiKey": self.api_key,
+                "searchNm": keyword,
+                "sort": "RANK",
+                "startCount": "1",
+                "resultCount": "30",
+                "format": "json",
+                "jsonVD": "Y",
+                "errMsg": "Y",
+            }
+            async with _KOSIS_GLOBAL_SEM:
+                resp = await self._client.get(
+                    f"{BASE_URL}/statisticsSearch.do", params=params, timeout=30.0
+                )
+            if resp.status_code == 200:
+                data = resp.json()
+                if isinstance(data, list) and data:
+                    return data
+        except Exception:
+            pass
+        return []
+
     async def _search_in_category(
         self, keyword: str, vw_cd: str, list_id: str,
         sem: asyncio.Semaphore | None = None,
@@ -735,9 +783,29 @@ class KosisClient:
     ) -> dict:
         intents = detect_intent(query)
 
+        # 쿼리 토큰 추출 (조사 제거 포함) — 표명 재랭킹에 사용
+        raw_tokens = set(query.lower().split())
+        query_tokens: set[str] = raw_tokens | {_strip_particle(t) for t in raw_tokens}
+        search_tokens = {t for t in query_tokens if len(t) >= 2 and t not in _SEARCH_STOPWORDS}
+        # 전체 검색용: 가장 긴 토큰 최대 2개 추출
+        global_kws = sorted(search_tokens, key=len, reverse=True)[:2]
+
+        def _to_item(r: dict) -> dict:
+            tid = r.get("TBL_ID", "")
+            oid = r.get("ORG_ID", "")
+            nm  = _normalize_output(r.get("TBL_NM", ""))
+            return {
+                "org_id": oid,
+                "tbl_id": tid,
+                "name": nm,
+                "updated": r.get("SEND_DE", ""),
+                "url": f"https://kosis.kr/statHtml/statHtml.do?orgId={oid}&tblId={tid}",
+            }
+
+        # 1차: 인텐트 기반 카테고리 검색 (기존 방식, 정밀도 높음)
         async def search_one(intent_cfg: dict) -> list[dict]:
             found: list[dict] = []
-            seen_tbl: set[str] = set()  # O(1) 중복 제거 (기존 O(n²) list 비교 개선)
+            seen_tbl: set[str] = set()
             for kw in intent_cfg["search_keywords"]:
                 try:
                     results = await self.search_statistics(
@@ -747,32 +815,53 @@ class KosisClient:
                         tid = r.get("TBL_ID", "")
                         if tid and tid not in seen_tbl:
                             seen_tbl.add(tid)
-                            found.append({
-                                "org_id": r.get("ORG_ID", ""),
-                                "tbl_id": tid,
-                                "name": _normalize_output(r.get("TBL_NM", "")),
-                                "updated": r.get("SEND_DE", ""),
-                            })
+                            found.append(_to_item(r))
                 except Exception:
                     pass
-            return found[:max_results]
+            return found
 
-        all_results_nested = await asyncio.gather(
-            *[search_one(ic) for ic in intents], return_exceptions=True
+        # 2차: 전체 카탈로그 검색 (vw_cd 없음) — 기관 무관 커버리지 확보
+        async def search_global(kw: str) -> list[dict]:
+            try:
+                results = await self.search_statistics_global(keyword=kw)
+                return [_to_item(r) for r in results if r.get("TBL_ID")]
+            except Exception:
+                return []
+
+        # 병렬 실행
+        intent_batches, global_batches = await asyncio.gather(
+            asyncio.gather(*[search_one(ic) for ic in intents], return_exceptions=True),
+            asyncio.gather(*[search_global(kw) for kw in global_kws], return_exceptions=True),
         )
-        merged: list[dict] = []
-        seen_ids: set[str] = set()
-        for batch in all_results_nested:
+
+        # 통합 + 표명-쿼리 토큰 겹침 스코어로 재랭킹
+        scored: dict[str, tuple[dict, float]] = {}
+
+        for batch in intent_batches:
             if isinstance(batch, list):
                 for item in batch:
-                    uid = f"{item.get('org_id')}_{item.get('tbl_id')}"
-                    if uid not in seen_ids:
-                        seen_ids.add(uid)
-                        merged.append(item)
-        merged = merged[:max_results]
+                    uid = f"{item['org_id']}_{item['tbl_id']}"
+                    # 인텐트 결과는 카테고리 정확도 보너스 +0.3
+                    score = _score_tbl(item["name"], search_tokens) + 0.3
+                    if uid not in scored or scored[uid][1] < score:
+                        scored[uid] = (item, score)
+
+        for batch in global_batches:
+            if isinstance(batch, list):
+                for item in batch:
+                    uid = f"{item['org_id']}_{item['tbl_id']}"
+                    score = _score_tbl(item["name"], search_tokens)
+                    if uid not in scored or scored[uid][1] < score:
+                        scored[uid] = (item, score)
+
+        tables = [
+            item for item, _ in
+            sorted(scored.values(), key=lambda x: x[1], reverse=True)
+        ][:max_results]
+
         return {
             "query": query,
             "intents": [i["intent"] for i in intents],
-            "count": len(merged),
-            "tables": merged,
+            "count": len(tables),
+            "tables": tables,
         }
