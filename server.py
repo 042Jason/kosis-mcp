@@ -228,13 +228,19 @@ function gen(){{
 async def kosis_find_by_intent(query: str, max_results: int = 12) -> str:
     """사용자의 연구/정책 의도를 자연어로 입력하면 관련 KOSIS 통계표를 자동으로 찾아줍니다.
     데이터 출처: 국가데이터처 KOSIS (구 통계청 — 2025년 국가데이터처로 기관명 변경, 항상 '국가데이터처'로 표기).
-    [query 작성 규칙] 사용자 질문에서 핵심 주제어만 추출해 전달하라 (예: "자살률" "고령화" "청년실업").
-    '연령별', '성별', '지역별', '월별' 같은 차원·분류어는 query에 포함하지 말 것 — 검색 노이즈가 된다.
-    [출력 규칙] 사용자에게 결과를 안내할 때는 반드시 각 항목의 'name' 필드(통계표명)를 사용하라.
-    'tbl_id'(예: DT_1B34E01) 같은 내부 식별자는 사용자에게 노출하지 말 것 — kosis_analyze 호출 시에만 내부적으로 사용.
-    [URL 표시 규칙] 사용자에게 결과를 안내할 때 각 항목의 'url' 필드를 함께 표시하라 — 사용자가 KOSIS에서 직접 확인할 수 있도록.
-    [재검색 금지] 이 도구는 1회 호출로 충분하다. 반환된 결과에 관련 표가 있으면 즉시 kosis_analyze를 호출하라.
-    결과가 마음에 들지 않더라도 동일 의도로 재검색하지 말 것 — 다른 키워드로 추가 검색은 1회까지만 허용."""
+
+    [사용 적합 쿼리] 정책 주제어 · 일반 개념어 (예: "자살률", "고령화", "청년실업", "소비자물가").
+    [사용 부적합 쿼리 — 즉시 kosis_browse로 전환]
+      - 특정 통계조사 고유명사: "광업제조업조사", "서비스업조사", "기업활동조사", "농업총조사" 등
+        → 고유명사는 인텐트 매핑 적중률이 낮음. kosis_browse L_5·O_8 등 카테고리 직접 탐색이 훨씬 정확.
+      - 결과가 1회 반환 후 관련 표가 없는 경우 → 재검색하지 말고 바로 kosis_browse로 전환.
+
+    [query 작성 규칙] 핵심 주제어만 추출 (예: "자살률" "고령화" "청년실업").
+    '연령별', '성별', '지역별', '월별' 같은 차원·분류어는 포함하지 말 것 — 검색 노이즈.
+
+    [출력 규칙] 결과를 안내할 때 'name' 필드(통계표명)와 'url' 필드를 함께 표시.
+    'tbl_id' 같은 내부 식별자는 사용자에게 노출하지 말 것.
+    [재검색 금지] 1회 호출로 충분. 관련 표 발견 시 즉시 kosis_analyze 호출."""
     client = _get_client()
     result = await client.search_by_intent(query=query, max_results=max_results)
     result["source"] = "국가데이터처 KOSIS"
@@ -275,18 +281,34 @@ async def kosis_analyze(
 ) -> str:
     """KOSIS 통계표 데이터를 조회하고 chart_hint와 함께 반환합니다.
     출처는 항상 '국가데이터처 KOSIS'로 표기할 것 (구 통계청 — 2025년 국가데이터처로 기관명 변경).
+
+    [breakdown 파라미터 — 핵심]
+    breakdown=True: 산업분류·지역 등 전체 세분류를 펼쳐서 반환. 산업/지역 차원이 있는 표는
+      반드시 breakdown=True로 호출해야 함 — False(기본값)는 산업·지역 차원 표에서 빈 결과 반환.
+      첫 호출은 filter_keyword를 비워두고 데이터 구조를 먼저 파악한 뒤 필요 시 좁힐 것.
+    breakdown=True 결과 필터링 기준:
+      - C1_NM(지역) = "전국" 행만 추출
+      - C2_NM(산업) = 최상위 집계 항목("제조업 전체", "전산업", "합계" 등) 행만 추출
+      - ITM_NM에서 사업체수·종사자수·매출액(또는 출하액) 항목만 선택
+
+    [조사별 주의사항]
+    - 광업·제조업조사: 헤드라인 지표는 '매출액'이 아닌 '출하액'. 10인 이상 사업체만 조사 대상.
+    - 서비스업조사(도소매·숙박·음식 포함): 매출액이 표준 지표. 1인 이상 사업체 대상.
+    - 기업활동조사: 상용 50인 이상 + 자본금 3억 이상만 대상 — 전수통계 아님.
+    - 농림어업총조사: 가구 단위 조사라 사업체수·매출액 프레임 부적합. 다른 통계 대안 제안.
+
     filter_keyword: 특정 항목만 필터링. 공백 구분 시 모든 단어를 AND 조건으로 매칭.
-      예) "자살" → 자살 포함 행만 / "대전 서구" → 대전+서구 모두 포함 행만 (전국 서구 중복 해소).
-      지역명 중복이 있는 경우 반드시 상위+하위 지역명을 함께 입력하라 (예: "부산 중구", "서울 중구").
-    breakdown: False(기본)=집계 합계만 조회(셀 수 최소화), True=성별·연령별 등 전체 세분류 조회(셀 수 증가 주의).
-    extra_tbl_ids: 작성방식 변경으로 시계열이 여러 표로 분리된 경우, 연속 시계열 구성을 위해
-      추가로 병합할 tbl_id를 쉼표로 구분해 전달. 예) "DT_3KB9001_OLD,DT_3KB9001_V2"
-      org_id는 tbl_id와 동일한 것으로 가정. 시간순 정렬 후 병합되며 주 표(tbl_id)의 데이터가 중복 연도에서 우선.
-      [사용 시점] kosis_browse에서 '(YYYY~)' 패턴의 형제 카테고리가 발견되거나, 조회 데이터 coverage가
-      사용자 요청 기간을 충족하지 못할 때 이 파라미터로 이전 방법론 표를 병합하라.
-    [출처 표시 — 필수, 예외 없음] 출력 형식에 따라 아래 필드를 사용하라.
-    - 텍스트·요약·분석·표: 반드시 'citation_full' 필드를 그대로 출력 (URL 포함).
-    - 차트·대시보드·시각화: 'citation' 필드만 footer에 표시 (URL은 시각화 내부엔 생략).
+      예) "전국" → 전국 행만 / "대전 서구" → 대전+서구 모두 포함 행만.
+      지역명 중복 시 상위+하위 지역명 함께 입력 (예: "부산 중구", "서울 중구").
+
+    extra_tbl_ids: 작성방식 변경으로 시계열이 여러 표로 분리된 경우 이전 표 ID를 쉼표로 구분해 전달.
+      예) "DT_3KB9001_OLD,DT_3KB9001_V2"
+      [사용 시점] kosis_browse에서 '(YYYY~)' 패턴 형제 카테고리 발견 시, 또는 분류 개정으로
+      표가 분리된 경우 최신 표 + 이전 표를 함께 전달해 연속 시계열 구성.
+
+    [출처 표시 — 필수]
+    - 텍스트·요약·분석·표: 'citation_full' 필드를 그대로 출력 (URL 포함).
+    - 차트·대시보드: 'citation' 필드만 footer에 표시.
     org_id·tbl_id 같은 내부 식별자는 사용자에게 노출하지 말 것."""
     client = _get_client()
 
@@ -411,8 +433,37 @@ async def kosis_analyze(
 @mcp.tool()
 async def kosis_browse(vw_cd: str = "MT_ZTITLE", parent_list_id: str = "A") -> str:
     """KOSIS 카테고리 트리를 탐색합니다. vw_cd: MT_ZTITLE(주제별) MT_TM1_TITLE(대상별) MT_TM2_TITLE(이슈별)
+
+    [워크플로우] 특정 통계조사명(광업제조업조사·서비스업조사 등)은 kosis_find_by_intent보다
+    이 도구로 카테고리를 직접 탐색하는 것이 훨씬 정확합니다.
+
+    [주요 카테고리 코드 — MT_ZTITLE 기준]
+      L_5  = 광업제조업조사 (사업체수·종사자수·출하액)
+      O_8  = 서비스업조사 (도소매·숙박·음식·서비스업 매출액)
+      A    = 인구·가구
+      C    = 노동·임금
+      D    = 농림어업
+      F    = 보건·의료
+      G    = 환경
+      H    = 교육·훈련
+      I    = 기업·산업
+      J    = 건설·주택
+      K    = 교통·물류
+      M    = 과학기술·ICT
+      N    = 문화·관광
+      Q    = 국민계정·경기·기업경영
+    모르는 조사: vw_cd=MT_ZTITLE, parent_list_id="A"부터 시작해 알파벳 순서로 탐색.
+
+    [표 선택 기준 — 트리 끝까지 내려간 뒤]
+      ① 이름에 "총괄", "주요지표", "산업구조별", "전국" 포함 → 헤드라인 표
+      ② "등록기반" vs "조사기반" 중복 시 → 등록기반이 더 포괄적
+      ③ "산업편 / 품목편 / 기업체편" 분기 시 → 산업편이 표준
+      ④ "11차 산업분류 개정", "10차 산업분류 개정" 식 분리 시 → 최신 표 tbl_id + 이전 표 tbl_id 모두 메모
+         → kosis_analyze 호출 시 extra_tbl_ids에 이전 표 전달로 연속 시계열 구성
+      ⑤ "종사자규모별", "매출액규모별" 세부 분해 표 → 헤드라인 아님, 건너뜀
+
     [시계열 분리 감지] sub_categories에 'methodology_split: true' 표시된 항목들은 동일 지표가
-    작성방식 변경으로 기간별로 분리된 구조입니다. 연속 시계열이 필요하면:
+    작성방식 변경으로 기간별 분리된 구조입니다. 연속 시계열이 필요하면:
       1. 각 하위 카테고리를 kosis_browse로 탐색해 tbl_id 목록 확인
       2. kosis_analyze 호출 시 최신 표를 tbl_id로, 이전 표들을 extra_tbl_ids로 전달
     """
@@ -454,22 +505,11 @@ async def kosis_explain(org_id: str, tbl_id: str) -> str:
     return json.dumps(compact[:5], ensure_ascii=False, separators=(',', ':'))
 
 
-@mcp.tool()
+# kosis_quick: @mcp.tool() 제거 — _normalize_output 오류 빈발 + browse→analyze 워크플로우로 대체.
+# 내부 함수로 보존 (향후 폴백 로직에서 참조 가능).
 async def kosis_quick(query: str) -> str:
-    """표 이름 + 기간이 명확한 쿼리를 한 번의 호출로 처리합니다 (검색 + 데이터 조회 원스텝).
-
-    [사용 시점] 다음 조건을 **모두** 충족할 때 이 도구를 사용하라:
-      ① 사용자가 특정 통계표 이름·주제를 명시했고 (예: "프랜차이즈통계", "합계출산율", "소비자물가지수")
-      ② 기간도 함께 지정했을 때 (예: "5개년치", "최근 3년", "2019~2024", "2015년부터")
-    조건 ①만 있거나 주제가 모호하면 kosis_find_by_intent를 사용하라.
-
-    [자동 처리 내용]
-      - 기간 표현 파싱: "5개년치"→recent_n=5, "최근 3년"→recent_n=3, "2019~2024"→start/end 설정
-      - 검색어 추출 후 KOSIS 통계표 검색
-      - 상위 매칭 표에서 데이터 즉시 조회
-      - other_candidates 필드로 유사 표 2~3개 추가 안내
-
-    [출처 표시 — 필수] citation_full 필드를 반드시 출력할 것."""
+    """[DEPRECATED — 도구 미노출] 검색+조회 원스텝 처리. _normalize_output 오류 빈발로 비활성화.
+    대안: kosis_browse로 카테고리 탐색 → kosis_analyze(breakdown=True) 워크플로우 사용."""
     client = _get_client()
 
     # 1. 기간 파싱 + 검색 키워드 추출
@@ -702,7 +742,6 @@ async def kosis_dashboard(datasets: list, dashboard_title: str = "KOSIS 통계 �
 
     fetched = await asyncio.gather(*[fetch_ds(ds) for ds in datasets])
     return json.dumps({
-        "dashboard_title": dashboard_title,
         "count": len([f for f in fetched if f]),
         "datasets": [f for f in fetched if f],
     }, ensure_ascii=False, separators=(',', ':'))
