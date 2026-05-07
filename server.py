@@ -83,6 +83,9 @@ def _process_data(data: list, color_field=None):
 # ---------------------------------------------------------------------------
 # FastMCP 인스턴스
 # ---------------------------------------------------------------------------
+# 표 이름에서 수록기간 힌트 파싱용 정규식 (매 요청마다 재컴파일 방지)
+_PERIOD_RE = re.compile(r'[(\s](\d{4})[–\-~](\d{4})?')
+
 mcp = FastMCP("kosis-mcp", host="0.0.0.0")
 
 
@@ -203,7 +206,6 @@ async def kosis_find_by_intent(query: str, max_results: int = 12) -> str:
     client = _get_client()
     result = await client.search_by_intent(query=query, max_results=max_results)
     result["source"] = "국가데이터처 KOSIS"
-    _period_re = re.compile(r'[(\s](\d{4})[–\-~](\d{4})?')
     for item in result.get("tables", []):
         oid = item.get("org_id", "")
         tid = item.get("tbl_id", "")
@@ -211,7 +213,7 @@ async def kosis_find_by_intent(query: str, max_results: int = 12) -> str:
             item["url"] = f"https://kosis.kr/statHtml/statHtml.do?orgId={oid}&tblId={tid}"
         # 표 이름에서 수록기간 힌트 파싱 — Claude가 기간별 표 선택에 활용
         name = item.get("name", "")
-        m = _period_re.search(name)
+        m = _PERIOD_RE.search(name)
         if m:
             item["period_hint"] = f"{m.group(1)}~{m.group(2) or ''}"
     # 동일 기관에서 period_hint가 여러 개면 split 시리즈 알림
@@ -335,21 +337,23 @@ async def kosis_analyze(
     if not merged_raw:
         return "데이터가 없습니다."
 
+    # filter_keyword를 _process_data 이전에 원본 데이터에 적용
+    # (이후 적용하면 _process_data가 unique>12 행을 "계"만 남겨 filter_keyword가 빈 결과 반환하는 버그 수정)
+    if filter_keyword:
+        raw_filter_cols = [k for k in (merged_raw[0].keys() if merged_raw else [])
+                           if k.endswith("_NM") or k == "ITM_NM"]
+        terms = [t.lower() for t in filter_keyword.split() if t]
+        merged_raw = [r for r in merged_raw
+                      if all(any(t in str(r.get(c, "")).lower() for c in raw_filter_cols)
+                             for t in terms)]
+
     cf = color_field or None
     if not cf:
         for c in ("ITM_NM", "C1_NM", "C2_NM"):
-            if c in set(merged_raw[0].keys()):
+            if c in set(merged_raw[0].keys()) if merged_raw else {}:
                 cf = c
                 break
     rows, summary, unit = _process_data(merged_raw, cf)
-
-    # filter_keyword 필터링 — 공백 구분 시 모든 단어 AND 매칭
-    if filter_keyword:
-        filter_cols = [k for k in (rows[0].keys() if rows else [])
-                       if k.endswith("_NM") or k == "ITM_NM"]
-        terms = [t.lower() for t in filter_keyword.split() if t]
-        rows = [r for r in rows
-                if all(any(t in str(r.get(c, "")).lower() for c in filter_cols) for t in terms)]
 
     # 데이터 coverage (시계열 범위) 계산
     prd_values = [r.get("PRD_DE", "") for r in rows if r.get("PRD_DE")]

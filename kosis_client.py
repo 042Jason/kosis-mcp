@@ -183,7 +183,7 @@ INTENT_MAP: dict[str, dict] = {
     "국민계정": {
         "vw_cd": "MT_ZTITLE",
         "keywords": ["gdp", "gni", "국민계정", "국내총생산", "경제성장률",
-                     "경제성장", "성장률", "경기침체", "경기둔화", "경기불황", "경제 성장", "경기 침체"],
+                     "경제성장", "성장률", "경기침체", "경기둔화", "경기불황", "경제 성장", "경기 침체", "성장 둔화", "성장 정체"],
         "topic_keywords": ["국내총생산", "경제성장률", "국민총소득", "소비지출"],
         # 영문 키워드는 소문자로 — _kw_matches가 query_lower(소문자 변환)와 비교하므로
         # "GDP" 대문자 키워드는 "gdp 성장률" 쿼리에서 미감지됨
@@ -261,6 +261,25 @@ _STOPWORDS = {
     "사망원인통계", "사망원인",  # 카테고리명보다 구체 주제어로 검색하는 게 정확
 }
 
+# 한국어 조사 목록 (긴 것부터 — 최장 일치 우선)
+_KO_PARTICLES: list[str] = sorted(
+    {"이가","가","이","을","를","은","는","의","와","과","으로","로","에서","에게",
+     "부터","까지","도","만","이나","나","이랑","랑","에","라","이라","들","께서",
+     "한테","한테서","보다","처럼","만큼","이면","면","고","며","이며","아","야"},
+    key=len, reverse=True,
+)
+
+
+def _strip_particle(token: str) -> str:
+    """토큰 끝에 붙은 한국어 조사를 제거. 어근이 2글자 미만이 되면 제거 안 함."""
+    if len(token) <= 2:
+        return token
+    for p in _KO_PARTICLES:
+        if token.endswith(p) and len(token) - len(p) >= 2:
+            return token[:-len(p)]
+    return token
+
+
 # 일반 인텐트 폴백 시 병렬 검색할 추가 vw_cd 목록
 _FALLBACK_VW_CDS = ["MT_ZTITLE", "MT_TM1_TITLE", "MT_TM2_TITLE"]
 
@@ -268,7 +287,9 @@ _FALLBACK_VW_CDS = ["MT_ZTITLE", "MT_TM1_TITLE", "MT_TM2_TITLE"]
 def detect_intent(query: str) -> list[dict]:
     matched = []
     query_lower = query.lower()
-    query_tokens = set(query_lower.split())  # 공백 기준 토큰 집합
+    raw_tokens = set(query_lower.split())
+    # 조사 제거 토큰도 추가 — "아이가"→"아이", "집값이"→"집값" 등 구어체 대응
+    query_tokens = raw_tokens | {_strip_particle(t) for t in raw_tokens}
 
     def _kw_matches(kw: str) -> bool:
         """
@@ -691,17 +712,20 @@ class KosisClient:
         intents = detect_intent(query)
 
         async def search_one(intent_cfg: dict) -> list[dict]:
-            found = []
+            found: list[dict] = []
+            seen_tbl: set[str] = set()  # O(1) 중복 제거 (기존 O(n²) list 비교 개선)
             for kw in intent_cfg["search_keywords"]:
                 try:
                     results = await self.search_statistics(
                         keyword=kw, vw_cd=intent_cfg["vw_cd"]
                     )
                     for r in results:
-                        if r.get("TBL_ID") and r not in found:
+                        tid = r.get("TBL_ID", "")
+                        if tid and tid not in seen_tbl:
+                            seen_tbl.add(tid)
                             found.append({
                                 "org_id": r.get("ORG_ID", ""),
-                                "tbl_id": r.get("TBL_ID", ""),
+                                "tbl_id": tid,
                                 "name": _normalize_output(r.get("TBL_NM", "")),
                                 "updated": r.get("SEND_DE", ""),
                             })
