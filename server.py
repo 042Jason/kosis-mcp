@@ -747,4 +747,8 @@ class _ApiKeyMiddleware:
             await self._app(scope, receive, send)
 
 
-starlette_app = _ApiKeyMiddlewar
+starlette_app = _ApiKeyMiddleware(_fastmcp_app)
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(starlette_app, host="0.0.0.0", port=port, log_level="info")
