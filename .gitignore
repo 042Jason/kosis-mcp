@@ -18,4 +18,15 @@ build/
 venv/
 
 # 생성된 차트 파일
-kosi
+kosis_charts/
+*.png
+*.html
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db

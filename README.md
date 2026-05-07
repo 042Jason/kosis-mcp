@@ -321,4 +321,24 @@ KOSIS는 통계 작성방식이 바뀌면 기존 표를 유지하고 새 표를 
 - **`filter_keyword` 사전 필터링 버그 수정**: 지역명 필터 적용 시 내부 데이터 전처리 순서 문제로 결과가 비는 버그 수정 — 이제 필터링을 원본 데이터에 먼저 적용
 - **중복 제거 O(n²) → O(1) 개선**: 검색 결과 중복 제거 로직을 리스트 선형탐색에서 해시 집합(set)으로 변경
 - **정규식 모듈 레벨 이동**: 매 요청마다 재컴파일되던 정규식을 모듈 상수로 이동
-- **�
+- **기관명 자동 변환**: KOSIS 데이터의 "통계청" → "국가데이터처" 자동 변환 (2025년 기관명 변경 반영)
+- **표 식별자 비노출**: `tbl_id`, `org_id` 등 내부 식별자는 사용자에게 노출하지 않고 통계표명으로만 안내
+
+---
+
+## 🏗 프로젝트 구조
+
+```
+kosis-mcp/
+├── server.py          # MCP 서버 (Streamable HTTP, 6개 도구)
+├── kosis_client.py    # KOSIS OpenAPI 클라이언트 + 의도 탐지
+├── requirements.txt   # Python 의존성
+├── Dockerfile         # Railway 배포용
+└── railway.toml       # Railway 설정
+```
+
+---
+
+## 📄 라이선스
+
+MIT License · 데이터 출처: [국가데이터처 KOSIS](https://kosis.kr)

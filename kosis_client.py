@@ -326,7 +326,20 @@ def detect_intent(query: str) -> list[dict]:
 
 
 # Module-level shared httpx client — one connection pool for all API keys
-_shared_http_client = httpx.AsyncClient(timeout=30.0)
+# keepalive_expiry=20: KOSIS 서버가 idle 연결을 먼저 닫기 전에 클라이언트가 먼저 정리
+# max_connections=20: Railway 단일 컨테이너에서 과도한 연결 방지
+# max_keepalive_connections=10: keep-alive pool 상한 (stale connection hang 방지)
+_shared_http_client = httpx.AsyncClient(
+    timeout=30.0,
+    limits=httpx.Limits(
+        max_connections=20,
+        max_keepalive_connections=10,
+        keepalive_expiry=20.0,
+    ),
+)
+
+# 전역 KOSIS API 동시 요청 제한 — 다수 인텐트 병렬 검색 시 rate limit·큐 대기 방지
+_KOSIS_GLOBAL_SEM = asyncio.Semaphore(8)
 
 
 class KosisClient:
@@ -358,11 +371,12 @@ class KosisClient:
         last_exc: Exception = RuntimeError("browse_categories: no attempts made")
         for attempt in range(_retries):
             try:
-                resp = await self._client.get(
-                    f"{BASE_URL}/statisticsList.do",
-                    params=params,
-                    timeout=45.0,
-                )
+                async with _KOSIS_GLOBAL_SEM:
+                    resp = await self._client.get(
+                        f"{BASE_URL}/statisticsList.do",
+                        params=params,
+                        timeout=45.0,
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 if isinstance(data, dict) and "err" in data:
@@ -652,9 +666,10 @@ class KosisClient:
                 "jsonVD": "Y",
                 "errMsg": "Y",
             }
-            resp = await self._client.get(
-                f"{BASE_URL}/statisticsSearch.do", params=params, timeout=30.0
-            )
+            async with _KOSIS_GLOBAL_SEM:
+                resp = await self._client.get(
+                    f"{BASE_URL}/statisticsSearch.do", params=params, timeout=30.0
+                )
             if resp.status_code == 200:
                 data = resp.json()
                 if isinstance(data, list) and len(data) > 0:
