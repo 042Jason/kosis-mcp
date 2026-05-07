@@ -135,8 +135,12 @@ INTENT_MAP: dict[str, dict] = {
     "연금": {
         "vw_cd": "MT_ZTITLE",
         "keywords": ["국민연금", "기초연금", "연금수급", "수급권자", "연금급여",
-                     "노령연금", "유족연금", "장애연금", "연금통계"],
+                     "노령연금", "유족연금", "장애연금", "연금통계",
+                     "수급액", "지급액", "연금액", "노인연금"],
         "topic_keywords": ["국민연금", "기초연금", "연금수급", "수급자", "연금급여"],
+        # "수급액"·"지급액"·"연금액"(3글자 substring) — "기초연금 지급액", "연금액 얼마" 등 직접 표현
+        # "노인연금"(4글자) — "노인들이 받는 연금" 구어체 단축 표현 대응
+        # "용돈" 제외 — 2글자 exact이나 "학생 용돈" 등 false positive 위험
         # 국민연금공단 통계(연금수급유형·지역별 수급자 등)는 MT_ZTITLE에서 검색할 때
         # "연금수급"·"수급권자"·"노령연금" 등 구체적 키워드로 올바른 표가 상위 노출됨
     },
@@ -850,7 +854,6 @@ class KosisClient:
             if isinstance(batch, list):
                 for item in batch:
                     uid = f"{item['org_id']}_{item['tbl_id']}"
-                    score = _score_tbl(item["name"], search_tokens)
                     if uid not in scored or scored[uid][1] < score:
                         scored[uid] = (item, score)
 
