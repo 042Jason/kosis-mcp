@@ -554,6 +554,117 @@ async def kosis_quick(query: str) -> str:
 
 
 @mcp.tool()
+async def kosis_combine(
+    datasets: list,
+    combine_title: str = "통합 분석",
+    compute_ratio: bool = True,
+    ratio_label: str = "비율(%)",
+    join_field: str = "PRD_DE",
+) -> str:
+    """여러 통계표 데이터를 조회한 뒤 공통 차원(연도 등)으로 JOIN하고 비율을 계산합니다.
+
+    [사용 시점] 단일 표에 '유형별 합계'가 없어서 여러 표를 결합해야 하는 경우.
+    예) 노령연금 수급자 표 + 유족연금 수급자 표 + 장애연금 수급자 표 → 유형별 비율 산출.
+
+    [datasets 형식] 각 항목은 dict로 아래 필드를 포함:
+      - org_id (str): 기관 ID
+      - tbl_id (str): 표 ID
+      - label (str): 이 표의 레이블 (예: "노령연금", "유족연금")
+      - filter_keyword (str, 선택): 특정 항목 필터 (예: "합계")
+      - recent_n (int, 선택, 기본 10): 최근 N년
+
+    [compute_ratio] True이면 각 연도에서 label별 DT 합계를 구하고 비율(%)을 계산해 반환.
+    [출처 표시 — 필수] 반환된 citations 배열을 모두 출력할 것."""
+    client = _get_client()
+
+    async def fetch_one(ds: dict) -> dict | None:
+        org_id = ds.get("org_id", "")
+        tbl_id = ds.get("tbl_id", "")
+        label  = ds.get("label", tbl_id)
+        fk     = ds.get("filter_keyword", "")
+        n      = int(ds.get("recent_n", 10))
+        try:
+            raw = await client.get_statistics_data(
+                org_id=org_id, tbl_id=tbl_id,
+                prd_se="Y", new_est_prd_cnt=n,
+            )
+        except Exception as e:
+            return {"label": label, "error": str(e)}
+
+        if not raw:
+            return {"label": label, "error": "데이터 없음"}
+
+        # filter_keyword 적용 (원본 데이터에서)
+        if fk:
+            filter_cols = [k for k in raw[0].keys() if k.endswith("_NM") or k == "ITM_NM"]
+            terms = [t.lower() for t in fk.split() if t]
+            raw = [r for r in raw if all(
+                any(t in str(r.get(c, "")).lower() for c in filter_cols)
+                for t in terms
+            )]
+
+        # 연도별 DT 합산 (숫자형만)
+        year_sum: dict[str, float] = {}
+        for row in raw:
+            yr = str(row.get("PRD_DE", ""))[:4]
+            try:
+                val = float(row.get("DT", 0) or 0)
+            except (ValueError, TypeError):
+                continue
+            year_sum[yr] = year_sum.get(yr, 0.0) + val
+
+        url = f"https://kosis.kr/statHtml/statHtml.do?orgId={org_id}&tblId={tbl_id}"
+        tbl_nm = _normalize_output(raw[0].get("TBL_NM", tbl_id) if raw else tbl_id)
+        return {
+            "label": label,
+            "tbl_nm": tbl_nm,
+            "year_sum": year_sum,
+            "citation": f"출처: 국가데이터처 KOSIS 「{tbl_nm}」 {url}",
+        }
+
+    fetched = await asyncio.gather(*[fetch_one(ds) for ds in datasets])
+    valid   = [f for f in fetched if f and "error" not in f]
+    errors  = [f for f in fetched if f and "error" in f]
+
+    if not valid:
+        return json.dumps({"error": "조회 가능한 데이터가 없습니다.", "details": errors},
+                          ensure_ascii=False, separators=(',', ':'))
+
+    # 공통 연도 집합
+    all_years = sorted(set().union(*[set(v["year_sum"].keys()) for v in valid]))
+
+    rows: list[dict] = []
+    for yr in all_years:
+        total = sum(v["year_sum"].get(yr, 0.0) for v in valid)
+        row: dict = {join_field: yr, "합계": round(total, 2)}
+        for v in valid:
+            val = v["year_sum"].get(yr, 0.0)
+            row[v["label"]] = round(val, 2)
+            if compute_ratio and total > 0:
+                row[f'{v["label"]}_{ratio_label}'] = round(val / total * 100, 1)
+        rows.append(row)
+
+    citations = [v["citation"] for v in valid]
+    labels    = [v["label"] for v in valid]
+
+    return json.dumps({
+        "title": combine_title,
+        "labels": labels,
+        "years": all_years,
+        "rows": rows,
+        "compute_ratio": compute_ratio,
+        "chart_hint": {
+            "chart_type": "bar",
+            "x_field": join_field,
+            "stack": True,
+            "series": labels,
+        },
+        "citations": citations,
+        "errors": errors if errors else None,
+    }, ensure_ascii=False, separators=(',', ':'))
+
+
+@mcp.tool()
 async def kosis_dashboard(datasets: list, dashboard_title: str = "KOSIS 통계 대시보드") -> str:
     """여러 통계표 데이터를 한꺼번에 조회해 반환합니다."""
     client = _get_client()
@@ -636,8 +747,4 @@ class _ApiKeyMiddleware:
             await self._app(scope, receive, send)
 
 
-starlette_app = _ApiKeyMiddleware(_fastmcp_app)
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(starlette_app, host="0.0.0.0", port=port, log_level="info")
+starlette_app = _ApiKeyMiddlewar
