@@ -551,11 +551,13 @@ class KosisClient:
         # ═══════════════════════════════════════════════════════════════════
 
         # ── Phase 1: objL depth + prd_se 자동 발견 ──────────────────────────
-        _ep_param = f"{BASE_URL}/Param/statisticsParameterData.do"
-        _ep_data  = f"{BASE_URL}/statisticsData.do"
-        _disc_depth = 2        # 기본 fallback: 2차원 가정
-        _disc_prd   = prd_se
-        _disc_found = False
+        _ep_param   = f"{BASE_URL}/Param/statisticsParameterData.do"
+        _ep_bigdata = f"{BASE_URL}/Param/statisticsBigDataParameterData.do"
+        _ep_data    = f"{BASE_URL}/statisticsData.do"
+        _disc_depth  = 2        # 기본 fallback: 2차원 가정
+        _disc_prd    = prd_se
+        _disc_found  = False
+        _use_bigdata = False    # err:31 → BigData 엔드포인트 필요 여부
 
         for _cur_prd in [prd_se] + [p for p in ["Y", "M", "Q"] if p != prd_se]:
             for _d in range(1, 5):
@@ -579,7 +581,21 @@ class KosisClient:
                     break
                 if isinstance(_dres, dict) and _dres.get("err") == "20":
                     continue           # objL 부족 → 다음 차원 추가
-                break                  # 빈 list, err:31 등 → 다음 prd_se 시도
+                if isinstance(_dres, dict) and _dres.get("err") == "31":
+                    # 40,000셀 초과 → BigData 엔드포인트로 재시도
+                    try:
+                        _bdr = await self._client.get(_ep_bigdata, params=_disc_p, timeout=15.0)
+                        _bdr.raise_for_status()
+                        _bdres = _bdr.json()
+                        if isinstance(_bdres, list) and _bdres:
+                            _disc_depth  = _d
+                            _disc_prd    = _cur_prd
+                            _disc_found  = True
+                            _use_bigdata = True
+                            break
+                    except Exception:
+                        pass
+                break                  # 빈 list, err:31(BigData도 실패) 등 → 다음 prd_se
             if _disc_found:
                 break
 
@@ -601,7 +617,10 @@ class KosisClient:
         # ── Phase 2: 발견된 depth + 원본 params 로 실제 데이터 조회 ─────────
         _objl_all = {f"objL{i}": "ALL" for i in range(1, _disc_depth + 1)}
         data = None
-        for _fetch_ep in [_ep_param, _ep_data]:   # Param 실패 시 statisticsData.do 폴백
+        # BigData 엔드포인트가 필요한 표는 BigData를 먼저 시도
+        _fetch_eps = ([_ep_bigdata, _ep_param, _ep_data] if _use_bigdata
+                      else [_ep_param, _ep_data])
+        for _fetch_ep in _fetch_eps:   # BigData 또는 Param → statisticsData.do 폴백
             try:
                 _fr = await self._client.get(
                     _fetch_ep, params=_build_params(itmId="ALL", **_objl_all)
@@ -678,10 +697,11 @@ class KosisClient:
                 reduced["newEstPrdCnt"] = str(new_est_prd_cnt)
                 reduced.pop("startPrdDe", None)
                 reduced.pop("endPrdDe", None)
-            for ep in [
-                f"{BASE_URL}/Param/statisticsParameterData.do",
-                f"{BASE_URL}/statisticsData.do",
-            ]:
+            _retry_eps = (
+                [_ep_bigdata, _ep_param, _ep_data] if _use_bigdata
+                else [_ep_param, _ep_bigdata, _ep_data]  # 일반 표도 BigData 폴백 포함
+            )
+            for ep in _retry_eps:
                 try:
                     r = await self._client.get(ep, params=reduced, timeout=30.0)
                     r.raise_for_status()
