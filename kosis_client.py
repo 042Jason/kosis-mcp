@@ -557,7 +557,8 @@ class KosisClient:
         _disc_depth  = 2        # 기본 fallback: 2차원 가정
         _disc_prd    = prd_se
         _disc_found  = False
-        _use_bigdata = False    # err:31 → BigData 엔드포인트 필요 여부
+        _use_bigdata      = False  # err:31 → BigData 엔드포인트 필요 여부
+        _use_national_pin = False  # err:31 → objL1=00(전국) 고정 전략 필요 여부
 
         for _cur_prd in [prd_se] + [p for p in ["Y", "M", "Q"] if p != prd_se]:
             for _d in range(1, 5):
@@ -582,7 +583,8 @@ class KosisClient:
                 if isinstance(_dres, dict) and _dres.get("err") == "20":
                     continue           # objL 부족 → 다음 차원 추가
                 if isinstance(_dres, dict) and _dres.get("err") == "31":
-                    # 40,000셀 초과 → BigData 엔드포인트로 재시도
+                    # 40,000셀 초과 → ① BigData 엔드포인트 재시도
+                    _bd_ok = False
                     try:
                         _bdr = await self._client.get(_ep_bigdata, params=_disc_p, timeout=15.0)
                         _bdr.raise_for_status()
@@ -592,10 +594,30 @@ class KosisClient:
                             _disc_prd    = _cur_prd
                             _disc_found  = True
                             _use_bigdata = True
+                            _bd_ok = True
                             break
                     except Exception:
                         pass
-                break                  # 빈 list, err:31(BigData도 실패) 등 → 다음 prd_se
+                    if not _bd_ok:
+                        # ② BigData도 err:31 → objL1=00(전국) 전략으로 depth는 확정
+                        _disc_p_nat = {**_disc_p, "objL1": "00"}
+                        try:
+                            _nr = await self._client.get(_ep_param, params=_disc_p_nat, timeout=10.0)
+                            _nr.raise_for_status()
+                            _nres = _nr.json()
+                            if isinstance(_nres, list) and _nres:
+                                _disc_depth       = _d
+                                _disc_prd         = _cur_prd
+                                _disc_found       = True
+                                _use_national_pin = True   # Phase 2에서 objL1=00 사용
+                                break
+                        except Exception:
+                            pass
+                        # 확인 불가여도 depth는 기록해두고 Phase 2에서 국내 전략 시도
+                        if not _disc_found:
+                            _disc_depth = _d
+                            _disc_prd   = _cur_prd
+                break                  # 빈 list, err:31(모두 실패) 등 → 다음 prd_se
             if _disc_found:
                 break
 
@@ -675,31 +697,49 @@ class KosisClient:
                 except Exception:
                     pass
 
-        # ── 4. err 31: 40,000셀 초과 → 기간 자동 축소 후 재시도 (최대 3회) ────
+        # ── 4. err:31: 40,000셀 초과 → 전략적 재시도 ──────────────────────────
+        # 전략 순서:
+        #   ① objL1=00(전국 합계) 고정  — 지역 차원이 있는 표에서 수백 배 셀 절감
+        #   ② objL1=00 + 기간 축소     — 여전히 크면 기간도 줄임
+        #   ③ 기간 축소만              — 지역 차원이 없는 표 대비 최후 수단
         _objl_all = {f"objL{i}": "ALL" for i in range(1, _found_depth + 1)}
+        _pinned_national = _use_national_pin   # Discovery에서 이미 플래그가 설정됐으면 인계
         retries = 3
         while isinstance(data, dict) and data.get("err") == "31" and retries > 0:
             retries -= 1
-            if new_est_prd_cnt and new_est_prd_cnt > 1:
-                new_est_prd_cnt = max(1, new_est_prd_cnt // 2)
-            elif start_prd_de and end_prd_de:
-                try:
-                    s = int(start_prd_de[:4])
-                    e = int(end_prd_de[:4])
-                    mid = (s + e) // 2
-                    start_prd_de = str(mid) + start_prd_de[4:]
-                except Exception:
-                    break
+            if not _pinned_national:
+                # 전략 ①: objL1=00(전국) 고정 + breakdown시 핵심 3지표 좁힘
+                # 지역 차원이 있는 표에서 수백 배 셀 절감
+                _pinned_national = True
+                _objl_nat = {**_objl_all, "objL1": "00"}
+                # breakdown=True 시 itmId를 사업체수·종사자수·매출액/출하액으로 좁힘
+                # (KOSIS 서비스업 표 공통 코드: T01·T02·T03)
+                _itm_narrow = "T01+T02+T03" if breakdown else "ALL"
+                reduced = _build_params(**_objl_nat, itmId=_itm_narrow)
             else:
-                break
-            reduced = _build_params(**_objl_all, itmId="ALL")
-            if new_est_prd_cnt:
-                reduced["newEstPrdCnt"] = str(new_est_prd_cnt)
-                reduced.pop("startPrdDe", None)
-                reduced.pop("endPrdDe", None)
+                # 전략 ②③: 기간 축소 (objL1=00 유지)
+                if new_est_prd_cnt and new_est_prd_cnt > 1:
+                    new_est_prd_cnt = max(1, new_est_prd_cnt // 2)
+                elif start_prd_de and end_prd_de:
+                    try:
+                        s = int(start_prd_de[:4])
+                        e = int(end_prd_de[:4])
+                        mid = (s + e) // 2
+                        start_prd_de = str(mid) + start_prd_de[4:]
+                    except Exception:
+                        break
+                else:
+                    break
+                _objl_for_retry = {**_objl_all, "objL1": "00"}  # 전국 고정 유지
+                _itm_narrow = "T01+T02+T03" if breakdown else "ALL"
+                reduced = _build_params(**_objl_for_retry, itmId=_itm_narrow)
+                if new_est_prd_cnt:
+                    reduced["newEstPrdCnt"] = str(new_est_prd_cnt)
+                    reduced.pop("startPrdDe", None)
+                    reduced.pop("endPrdDe", None)
             _retry_eps = (
                 [_ep_bigdata, _ep_param, _ep_data] if _use_bigdata
-                else [_ep_param, _ep_bigdata, _ep_data]  # 일반 표도 BigData 폴백 포함
+                else [_ep_param, _ep_bigdata, _ep_data]
             )
             for ep in _retry_eps:
                 try:
@@ -717,6 +757,26 @@ class KosisClient:
             raise ValueError(
                 f"KOSIS API error: {data}  request_id: {data.get('request_id', '')}"
             )
+
+        # ── 5. breakdown=True 후처리 필터 ─────────────────────────────────────
+        # ~3,000행 원본 → ~30행 (전국 + 산업 대분류 + 핵심 지표)
+        # - C1_NM = "전국" 행만
+        # - C2 코드가 1자 알파벳(KSIC 대분류 A·B·C…) 또는 C2_NM에 "합계" 포함
+        # - ITM_NM = 사업체수·종사자수·매출액·출하액 중 하나
+        if isinstance(data, list) and data and breakdown and _pinned_national:
+            _CORE_ITEMS = {"사업체수", "종사자수", "매출액", "출하액"}
+            _filtered = [
+                r for r in data
+                if r.get("C1_NM") == "전국"
+                and (
+                    (len(r.get("C2", "")) == 1 and r.get("C2", "").isalpha())
+                    or "합계" in r.get("C2_NM", "")
+                )
+                and r.get("ITM_NM") in _CORE_ITEMS
+            ]
+            if _filtered:   # 필터 결과가 있을 때만 적용 (없으면 원본 유지)
+                data = _filtered
+
         return data if isinstance(data, list) else []
 
     # ── 4. Statistics explanation ────────────────────────────────────────────
