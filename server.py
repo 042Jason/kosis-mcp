@@ -34,6 +34,132 @@ def _get_client() -> KosisClient:
 _KEEP_FIELDS = {"PRD_DE", "DT", "ITM_NM", "C1_NM", "C2_NM", "C3_NM"}
 # UNIT_NM은 최상위 unit 필드로 반환 — 각 행 중복 포함 제거로 페이로드 절감
 
+# ── 행정구역 계층 인지 필터 ───────────────────────────────────────────────────
+# 시도 단축명 → 행정구역 코드 앞 2자리 (행정안전부 기준)
+_SIDO_PREFIX: dict[str, str] = {
+    "서울": "11", "부산": "26", "대구": "27", "인천": "28",
+    "광주": "29", "대전": "30", "울산": "31", "세종": "36",
+    "경기": "41", "강원": "51", "충북": "43", "충남": "44",
+    "전북": "52", "전남": "46", "경북": "47", "경남": "48", "제주": "50",
+}
+# 역매핑: prefix → 단축명
+_PREFIX_SIDO: dict[str, str] = {v: k for k, v in _SIDO_PREFIX.items()}
+
+
+def _apply_region_filter(rows: list, filter_keyword: str) -> tuple[list, dict]:
+    """시도+시군구 결합 키워드를 계층 인지(hierarchical) 방식으로 필터링.
+
+    문제: 시군구 단위 표에서 C1_NM에 시군구명만 들어있고 상위 시도는 코드(C1)에만 존재.
+    예) filter_keyword="대전 서구" → "대전"이 어느 _NM 컬럼에도 없어 0건 반환.
+
+    해결:
+    1. 토큰에서 시도명(대전·서울…) 분리
+    2. 시도명은 _NM 컬럼 직접 매칭 시도 → 없으면 행정구역 코드 prefix(앞 2자리) 매칭
+    3. 나머지 토큰은 기존 _NM 컬럼 텍스트 매칭
+    4. 동명 시군구(서구 등)가 여러 시도에 걸치면 ambiguity_warning 반환
+    5. 0건이면 applied_filters + hint 반환
+    """
+    if not rows or not filter_keyword:
+        return rows, {}
+
+    tokens = [t.strip().lower() for t in filter_keyword.split() if t.strip()]
+    nm_cols  = [k for k in rows[0].keys() if k.endswith("_NM") or k == "ITM_NM"]
+    code_cols = [k for k in rows[0].keys() if k in ("C1", "C2", "C3", "C4")]
+
+    # 시도 토큰 분리
+    sido_prefix: str | None = None
+    remaining_tokens: list[str] = []
+    for tok in tokens:
+        # 단축명 exact 매칭 (대전·서울 등) 또는 full 시도명 포함 여부
+        matched_prefix = _SIDO_PREFIX.get(tok)
+        if not matched_prefix:
+            # "대전광역시" → "대전" 포함 여부로 재시도
+            for nm, pfx in _SIDO_PREFIX.items():
+                if tok.startswith(nm.lower()) or nm.lower().startswith(tok):
+                    matched_prefix = pfx
+                    break
+        if matched_prefix:
+            sido_prefix = matched_prefix
+        else:
+            remaining_tokens.append(tok)
+
+    filtered = rows[:]
+
+    # ① 시도 필터
+    if sido_prefix:
+        # 먼저 _NM 컬럼에서 시도명 직접 검색
+        sido_nms_for_prefix = [nm for nm, p in _SIDO_PREFIX.items() if p == sido_prefix]
+
+        def _row_has_sido_in_nm(r: dict) -> bool:
+            for col in nm_cols:
+                v = str(r.get(col, ""))
+                if any(nm in v for nm in sido_nms_for_prefix):
+                    return True
+            return False
+
+        nm_filtered = [r for r in filtered if _row_has_sido_in_nm(r)]
+        if nm_filtered:
+            filtered = nm_filtered
+        elif code_cols:
+            # _NM에 시도명 없음 → 코드 prefix 매칭 (시군구 단위 표)
+            filtered = [
+                r for r in filtered
+                if any(str(r.get(c, "")).startswith(sido_prefix) for c in code_cols)
+            ]
+            # 코드도 없으면 원본 유지 (최후 안전망)
+            if not filtered:
+                filtered = rows[:]
+
+    # ② 나머지 토큰 텍스트 매칭
+    if remaining_tokens:
+        filtered = [
+            r for r in filtered
+            if all(
+                any(t in str(r.get(c, "")).lower() for c in nm_cols)
+                for t in remaining_tokens
+            )
+        ]
+
+    # ③ 동명 시군구 중의성 경고
+    extra: dict = {}
+    if not sido_prefix and remaining_tokens and filtered and code_cols:
+        seen_sido: set[str] = set()
+        for r in filtered:
+            for c in code_cols:
+                v = str(r.get(c, ""))
+                if len(v) >= 2 and v[:2].isdigit():
+                    seen_sido.add(v[:2])
+        if len(seen_sido) > 1:
+            names = [_PREFIX_SIDO.get(p, p) for p in sorted(seen_sido)]
+            extra["ambiguity_warning"] = (
+                f"동명 시군구가 {len(seen_sido)}개 시도에 존재합니다: "
+                f"{', '.join(names)}. "
+                "정확한 지역 지정을 위해 시도명을 함께 입력하세요 (예: '대전 서구')."
+            )
+
+    # ④ 0건 시 디버그 힌트
+    if not filtered:
+        sample = []
+        for r in rows[:5]:
+            for c in nm_cols[:3]:
+                v = str(r.get(c, ""))
+                if v:
+                    sample.append(f"{c}={v}")
+                    break
+        extra["applied_filters"] = {
+            "keyword": filter_keyword,
+            "sido_prefix": sido_prefix,
+            "remaining_terms": remaining_tokens,
+        }
+        if sample:
+            extra["available_columns_sample"] = sample
+        extra["hint"] = (
+            "시도와 시군구가 별도 차원으로 분리된 표일 수 있습니다. "
+            "시도명만 단독 입력하거나, filter_keyword 없이 전체 조회 후 구조를 파악하세요."
+        )
+
+    return filtered, extra
+
 
 def _process_data(data: list, color_field=None):
     if not data:
@@ -297,9 +423,10 @@ async def kosis_analyze(
     - 기업활동조사: 상용 50인 이상 + 자본금 3억 이상만 대상 — 전수통계 아님.
     - 농림어업총조사: 가구 단위 조사라 사업체수·매출액 프레임 부적합. 다른 통계 대안 제안.
 
-    filter_keyword: 특정 항목만 필터링. 공백 구분 시 모든 단어를 AND 조건으로 매칭.
-      예) "전국" → 전국 행만 / "대전 서구" → 대전+서구 모두 포함 행만.
-      지역명 중복 시 상위+하위 지역명 함께 입력 (예: "부산 중구", "서울 중구").
+    filter_keyword: 특정 항목만 필터링. 시도+시군구 결합 키워드를 계층 인지 방식으로 처리.
+      예) "대전 서구" → 시도(대전) 분리 후 코드 prefix 매칭 → 시군구명 텍스트 매칭.
+      동명 시군구(서구·남구 등)는 ambiguity_warning으로 안내.
+      시도만 입력하면 해당 시도 전체 반환. 0건 시 applied_filters+hint 포함.
 
     extra_tbl_ids: 작성방식 변경으로 시계열이 여러 표로 분리된 경우 이전 표 ID를 쉼표로 구분해 전달.
       예) "DT_3KB9001_OLD,DT_3KB9001_V2"
@@ -367,15 +494,11 @@ async def kosis_analyze(
             )
         return json.dumps({"error": "데이터가 없습니다." + hint, "tbl_id": tbl_id}, ensure_ascii=False)
 
-    # filter_keyword를 _process_data 이전에 원본 데이터에 적용
+    # filter_keyword를 _process_data 이전에 원본 데이터에 적용 (시도+시군구 계층 인지)
     # (이후 적용하면 _process_data가 unique>12 행을 "계"만 남겨 filter_keyword가 빈 결과 반환하는 버그 수정)
+    _region_extra: dict = {}
     if filter_keyword:
-        raw_filter_cols = [k for k in (merged_raw[0].keys() if merged_raw else [])
-                           if k.endswith("_NM") or k == "ITM_NM"]
-        terms = [t.lower() for t in filter_keyword.split() if t]
-        merged_raw = [r for r in merged_raw
-                      if all(any(t in str(r.get(c, "")).lower() for c in raw_filter_cols)
-                             for t in terms)]
+        merged_raw, _region_extra = _apply_region_filter(merged_raw, filter_keyword)
 
     cf = color_field or None
     if not cf:
@@ -403,6 +526,7 @@ async def kosis_analyze(
     }
     if merged_info:
         result["merged_tables"] = merged_info
+    result.update(_region_extra)   # ambiguity_warning / applied_filters / hint 등
     return json.dumps(result, ensure_ascii=False, separators=(',', ':'))
 
 
@@ -610,14 +734,9 @@ async def kosis_combine(
         if not raw:
             return {"label": label, "error": "데이터 없음"}
 
-        # filter_keyword 적용 (원본 데이터에서)
+        # filter_keyword 적용 (시도+시군구 계층 인지 방식)
         if fk:
-            filter_cols = [k for k in raw[0].keys() if k.endswith("_NM") or k == "ITM_NM"]
-            terms = [t.lower() for t in fk.split() if t]
-            raw = [r for r in raw if all(
-                any(t in str(r.get(c, "")).lower() for c in filter_cols)
-                for t in terms
-            )]
+            raw, _ = _apply_region_filter(raw, fk)
 
         # 연도별 DT 합산 (숫자형만)
         year_sum: dict[str, float] = {}
