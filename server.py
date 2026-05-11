@@ -49,78 +49,86 @@ _PREFIX_SIDO: dict[str, str] = {v: k for k, v in _SIDO_PREFIX.items()}
 def _apply_region_filter(rows: list, filter_keyword: str) -> tuple[list, dict]:
     """시도+시군구 결합 키워드를 계층 인지(hierarchical) 방식으로 필터링.
 
-    문제: 시군구 단위 표에서 C1_NM에 시군구명만 들어있고 상위 시도는 코드(C1)에만 존재.
-    예) filter_keyword="대전 서구" → "대전"이 어느 _NM 컬럼에도 없어 0건 반환.
-
-    해결:
-    1. 토큰에서 시도명(대전·서울…) 분리
-    2. 시도명은 _NM 컬럼 직접 매칭 시도 → 없으면 행정구역 코드 prefix(앞 2자리) 매칭
-    3. 나머지 토큰은 기존 _NM 컬럼 텍스트 매칭
-    4. 동명 시군구(서구 등)가 여러 시도에 걸치면 ambiguity_warning 반환
-    5. 0건이면 applied_filters + hint 반환
+    핵심 수정 (2차):
+    - 시도 필터: NM 매칭 OR 코드 prefix 매칭을 합산(union) 적용.
+      1차에서 elif 분기로 둘 중 하나만 적용돼 "대전 서구"가 0건이던 버그 수정.
+    - cross-column AND: 시도 필터는 C1(코드)+C1_NM, 나머지 토큰은 C2_NM 이하에서만 매칭.
+      "대전 음식점"에서 "음식점"이 C1_NM="전국"에 섞이는 버그 수정.
+    - 전국 고정 감지: breakdown=True+err:31 후 모든 C1_NM="전국"이면 지역 필터 생략+경고.
+    - available_dimensions: 실제 코드+이름 샘플 제공 (진단 가시성).
     """
     if not rows or not filter_keyword:
         return rows, {}
 
     tokens = [t.strip().lower() for t in filter_keyword.split() if t.strip()]
-    nm_cols  = [k for k in rows[0].keys() if k.endswith("_NM") or k == "ITM_NM"]
-    code_cols = [k for k in rows[0].keys() if k in ("C1", "C2", "C3", "C4")]
+    # NM 컬럼 분리: C1_NM은 지역 차원 전용, 나머지는 산업·항목 등 일반 차원
+    all_nm_cols = [k for k in rows[0].keys() if k.endswith("_NM") or k == "ITM_NM"]
+    c1_nm_col   = "C1_NM" if "C1_NM" in rows[0] else None
+    other_nm_cols = [c for c in all_nm_cols if c != c1_nm_col]  # C2_NM, ITM_NM 등
+    code_cols   = [k for k in rows[0].keys() if k in ("C1", "C2", "C3", "C4")]
 
-    # 시도 토큰 분리
+    # ── 시도 토큰 분리 ─────────────────────────────────────────────────────────
     sido_prefix: str | None = None
     remaining_tokens: list[str] = []
     for tok in tokens:
-        # 단축명 exact 매칭 (대전·서울 등) 또는 full 시도명 포함 여부
-        matched_prefix = _SIDO_PREFIX.get(tok)
-        if not matched_prefix:
-            # "대전광역시" → "대전" 포함 여부로 재시도
+        matched = _SIDO_PREFIX.get(tok)
+        if not matched:
             for nm, pfx in _SIDO_PREFIX.items():
                 if tok.startswith(nm.lower()) or nm.lower().startswith(tok):
-                    matched_prefix = pfx
+                    matched = pfx
                     break
-        if matched_prefix:
-            sido_prefix = matched_prefix
+        if matched:
+            sido_prefix = matched
         else:
             remaining_tokens.append(tok)
 
     filtered = rows[:]
 
-    # ① 시도 필터
+    # ── ① 시도 필터 ───────────────────────────────────────────────────────────
     if sido_prefix:
-        # 먼저 _NM 컬럼에서 시도명 직접 검색
-        sido_nms_for_prefix = [nm for nm, p in _SIDO_PREFIX.items() if p == sido_prefix]
+        sido_nms = [nm for nm, p in _SIDO_PREFIX.items() if p == sido_prefix]
 
-        def _row_has_sido_in_nm(r: dict) -> bool:
-            for col in nm_cols:
-                v = str(r.get(col, ""))
-                if any(nm in v for nm in sido_nms_for_prefix):
-                    return True
-            return False
+        # 전국 고정 감지: 모든 행이 이미 C1_NM="전국"이면 지역 필터 불가 (breakdown=True 결과)
+        all_national = (c1_nm_col and all(r.get(c1_nm_col) == "전국" for r in filtered))
+        if all_national:
+            # 시도 필터 건너뜀 — 이미 전국 집계. 경고만 추가
+            pass
+        else:
+            # NM 매칭 + 코드 prefix 매칭을 OR로 합산 (핵심 버그 수정)
+            def _matches_sido(r: dict) -> bool:
+                # 방법 1: C1_NM 등 NM 컬럼에서 시도명 직접 매칭
+                if c1_nm_col:
+                    v = str(r.get(c1_nm_col, ""))
+                    if any(nm in v for nm in sido_nms):
+                        return True
+                # 방법 2: 행정구역 코드 prefix 매칭 (시군구 단위 표)
+                for col in code_cols:
+                    v = str(r.get(col, ""))
+                    if v and v.isdigit() and v.startswith(sido_prefix):
+                        return True
+                return False
 
-        nm_filtered = [r for r in filtered if _row_has_sido_in_nm(r)]
-        if nm_filtered:
-            filtered = nm_filtered
-        elif code_cols:
-            # _NM에 시도명 없음 → 코드 prefix 매칭 (시군구 단위 표)
-            filtered = [
-                r for r in filtered
-                if any(str(r.get(c, "")).startswith(sido_prefix) for c in code_cols)
-            ]
-            # 코드도 없으면 원본 유지 (최후 안전망)
-            if not filtered:
-                filtered = rows[:]
+            sido_filtered = [r for r in filtered if _matches_sido(r)]
+            if sido_filtered:
+                filtered = sido_filtered
+            # 0건이면 원본 유지 (이미 시도로 좁혀진 API 응답 등)
 
-    # ② 나머지 토큰 텍스트 매칭
+
+    # ── ② 나머지 토큰: ALL nm_cols에서 AND 매칭 ────────────────────────────
     if remaining_tokens:
+        # remaining_tokens은 ALL nm_cols에서 검색 (C1_NM 포함).
+        # 시도 필터가 이미 sido_prefix로 범위를 좁혔으므로 C1_NM 포함 안전.
+        # "대전 서구": sido=30 필터 후 C1_NM="서구"에서 "서구" 매칭 가능.
+        # "대전 음식점": sido=30 필터 후 C2_NM="음식점업"에서 "음식점" 매칭.
         filtered = [
             r for r in filtered
             if all(
-                any(t in str(r.get(c, "")).lower() for c in nm_cols)
+                any(t in str(r.get(c, "")).lower() for c in all_nm_cols)
                 for t in remaining_tokens
             )
         ]
 
-    # ③ 동명 시군구 중의성 경고
+    # ── ③ 동명 시군구 중의성 경고 ─────────────────────────────────────────────
     extra: dict = {}
     if not sido_prefix and remaining_tokens and filtered and code_cols:
         seen_sido: set[str] = set()
@@ -137,22 +145,34 @@ def _apply_region_filter(rows: list, filter_keyword: str) -> tuple[list, dict]:
                 "정확한 지역 지정을 위해 시도명을 함께 입력하세요 (예: '대전 서구')."
             )
 
-    # ④ 0건 시 디버그 힌트
+    # 전국 고정 + 시도 필터 요청 → 별도 경고
+    if sido_prefix and c1_nm_col and all(r.get(c1_nm_col) == "전국" for r in rows):
+        extra["region_filter_warning"] = (
+            "이 표는 전국 집계 데이터만 있어 시도·시군구 필터가 적용되지 않았습니다. "
+            "시도별 데이터를 보려면 breakdown=False로 호출하거나, "
+            "시도별 세부 표를 kosis_browse로 탐색하세요."
+        )
+
+    # ── ④ 0건 시 디버그 정보 ──────────────────────────────────────────────────
     if not filtered:
-        sample = []
-        for r in rows[:5]:
-            for c in nm_cols[:3]:
-                v = str(r.get(c, ""))
-                if v:
-                    sample.append(f"{c}={v}")
-                    break
+        # available_dimensions: 차원별 실제 값 샘플 (중복 제거)
+        dims: dict = {}
+        for r in rows[:30]:
+            for c in rows[0].keys():
+                if c in ("C1", "C2", "C3", "C4") or c.endswith("_NM") or c.endswith("_OBJ_NM"):
+                    v = str(r.get(c, "")).strip()
+                    if v:
+                        dims.setdefault(c, set()).add(v)
+        dims_sample = {
+            k: sorted(v)[:5] for k, v in dims.items()
+            if k not in ("TBL_NM",) and len(k) <= 10
+        }
         extra["applied_filters"] = {
             "keyword": filter_keyword,
             "sido_prefix": sido_prefix,
             "remaining_terms": remaining_tokens,
         }
-        if sample:
-            extra["available_columns_sample"] = sample
+        extra["available_dimensions"] = dims_sample
         extra["hint"] = (
             "시도와 시군구가 별도 차원으로 분리된 표일 수 있습니다. "
             "시도명만 단독 입력하거나, filter_keyword 없이 전체 조회 후 구조를 파악하세요."
