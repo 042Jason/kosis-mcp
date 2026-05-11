@@ -540,61 +540,87 @@ class KosisClient:
             p.update(extra)
             return p
 
-        # ── objL 단계적 확장 헬퍼 (R kosis 패키지 패턴) ────────────────────────
-        # objL1=ALL 부터 시작. err:20 발생 시 objL2, objL3, objL4 순차 추가.
-        # total_codes(합계코드)로 좁히는 기존 방식은 테이블마다 코드가 달라 빈 결과를 낳는
-        # 버그가 있었음. 이제 모든 차원을 ALL로 요청하고 err:31(셀 초과) 발생 시에만 기간 축소.
-        async def _progressive_fetch(build_fn) -> tuple:
-            """objL을 1→4 차원까지 확장하며 시도. (data, found_depth) 반환."""
-            objl: dict[str, str] = {}
-            ep = f"{BASE_URL}/Param/statisticsParameterData.do"
-            for depth in range(1, 5):
-                objl[f"objL{depth}"] = "ALL"
-                params = build_fn(itmId="ALL", **objl)
+        # ═══════════════════════════════════════════════════════════════════
+        # 핵심 설계:
+        #   Phase 1 (Discovery) — newEstPrdCnt=1만 사용, 날짜 범위 없음
+        #     objL1=ALL → err:20 → objL2=ALL → ... → objL4=ALL
+        #     날짜 파라미터(startPrdDe/endPrdDe)를 함께 보내면 Param 엔드포인트가
+        #     err:20을 반복하므로, discovery는 반드시 newEstPrdCnt로만 수행해야 함.
+        #   Phase 2 (Fetch) — 발견된 depth + 원본 params(날짜 포함)로 실제 데이터 조회
+        #     Param 엔드포인트 실패 시 statisticsData.do 폴백
+        # ═══════════════════════════════════════════════════════════════════
+
+        # ── Phase 1: objL depth + prd_se 자동 발견 ──────────────────────────
+        _ep_param = f"{BASE_URL}/Param/statisticsParameterData.do"
+        _ep_data  = f"{BASE_URL}/statisticsData.do"
+        _disc_depth = 2        # 기본 fallback: 2차원 가정
+        _disc_prd   = prd_se
+        _disc_found = False
+
+        for _cur_prd in [prd_se] + [p for p in ["Y", "M", "Q"] if p != prd_se]:
+            for _d in range(1, 5):
+                _disc_p = {
+                    "method": "getList", "apiKey": self.api_key,
+                    "orgId": org_id, "tblId": tbl_id, "prdSe": _cur_prd,
+                    "newEstPrdCnt": "1", "itmId": "ALL",   # ← 날짜 범위 없이 newEstPrdCnt=1
+                    "format": "json", "jsonVD": "Y", "errMsg": "Y",
+                    **{f"objL{i}": "ALL" for i in range(1, _d + 1)},
+                }
                 try:
-                    _r = await self._client.get(ep, params=params)
-                    _r.raise_for_status()
-                    result = _r.json()
+                    _dr = await self._client.get(_ep_param, params=_disc_p, timeout=10.0)
+                    _dr.raise_for_status()
+                    _dres = _dr.json()
                 except Exception:
+                    continue
+                if isinstance(_dres, list) and _dres:
+                    _disc_depth = _d
+                    _disc_prd   = _cur_prd
+                    _disc_found = True
                     break
-                if isinstance(result, list) and result:
-                    return result, depth      # ✓ 성공
-                if isinstance(result, dict) and result.get("err") == "20":
-                    continue                  # objL 부족 → 다음 차원 추가
-                return result, depth          # err:30·31·empty list 등 → 루프 종료
-            return {}, 4
+                if isinstance(_dres, dict) and _dres.get("err") == "20":
+                    continue           # objL 부족 → 다음 차원 추가
+                break                  # 빈 list, err:31 등 → 다음 prd_se 시도
+            if _disc_found:
+                break
 
-        # ── 1. progressive objL 조회 ──────────────────────────────────────────
-        data, _found_depth = await _progressive_fetch(_build_params)
+        # prd_se 가 바뀌었으면 _build_params 재정의
+        if _disc_prd != prd_se:
+            def _build_params(**extra) -> dict:  # noqa: F811
+                p = {
+                    "method": "getList", "apiKey": self.api_key,
+                    "orgId": org_id, "tblId": tbl_id, "prdSe": _disc_prd,
+                    "format": "json", "jsonVD": "Y", "errMsg": "Y",
+                }
+                if start_prd_de: p["startPrdDe"] = start_prd_de
+                if end_prd_de:   p["endPrdDe"]   = end_prd_de
+                if new_est_prd_cnt and not start_prd_de:
+                    p["newEstPrdCnt"] = str(new_est_prd_cnt)
+                p.update(extra)
+                return p
 
-        # ── 2. 빈 결과 → prd_se 오탐 가능성 → probe로 수록주기만 감지 ─────────
-        if not (isinstance(data, list) and data):
-            resolved = await self._probe_table_params(org_id, tbl_id, prd_se)
-            actual_prd = resolved["prd_se"]
-            if actual_prd != prd_se:
-                # prd_se 재정의 후 progressive 재시도
-                def _build_params_prd(**extra) -> dict:  # noqa: F811
-                    p = {
-                        "method": "getList",
-                        "apiKey": self.api_key,
-                        "orgId": org_id,
-                        "tblId": tbl_id,
-                        "prdSe": actual_prd,
-                        "format": "json",
-                        "jsonVD": "Y",
-                        "errMsg": "Y",
-                    }
-                    if start_prd_de:
-                        p["startPrdDe"] = start_prd_de
-                    if end_prd_de:
-                        p["endPrdDe"] = end_prd_de
-                    if new_est_prd_cnt and not start_prd_de:
-                        p["newEstPrdCnt"] = str(new_est_prd_cnt)
-                    p.update(extra)
-                    return p
-                data, _found_depth = await _progressive_fetch(_build_params_prd)
-                if isinstance(data, list) and data:
-                    _build_params = _build_params_prd  # 이후 err:31 재시도에 사용
+        # ── Phase 2: 발견된 depth + 원본 params 로 실제 데이터 조회 ─────────
+        _objl_all = {f"objL{i}": "ALL" for i in range(1, _disc_depth + 1)}
+        data = None
+        for _fetch_ep in [_ep_param, _ep_data]:   # Param 실패 시 statisticsData.do 폴백
+            try:
+                _fr = await self._client.get(
+                    _fetch_ep, params=_build_params(itmId="ALL", **_objl_all)
+                )
+                _fr.raise_for_status()
+                _fd = _fr.json()
+            except Exception:
+                continue
+            if isinstance(_fd, list):
+                data = _fd
+                break
+            if isinstance(_fd, dict) and _fd.get("err") == "31":
+                data = _fd    # err:31 → 아래 축소 재시도 핸들러로 전달
+                break
+            # err:20 또는 기타 → 다음 엔드포인트 시도
+        if data is None:
+            data = []
+
+        _found_depth = _disc_depth  # 이후 err:31 재시도에서 사용
 
         # ── 3. breakdown=False → 조회된 데이터에서 합계코드 추출 후 재조회 ────
         #    (셀 수 절감 선택적 최적화. 실패하면 ALL로 가져온 원본 데이터 그대로 사용)
