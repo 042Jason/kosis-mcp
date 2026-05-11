@@ -540,28 +540,40 @@ class KosisClient:
             p.update(extra)
             return p
 
-        # ── 1차 시도: 주어진 파라미터로 Param 엔드포인트 ─────────────────────
-        resp = await self._client.get(
-            f"{BASE_URL}/Param/statisticsParameterData.do",
-            params=_build_params(objL1=obj_l1, itmId=itm_id),
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        # ── objL 단계적 확장 헬퍼 (R kosis 패키지 패턴) ────────────────────────
+        # objL1=ALL 부터 시작. err:20 발생 시 objL2, objL3, objL4 순차 추가.
+        # total_codes(합계코드)로 좁히는 기존 방식은 테이블마다 코드가 달라 빈 결과를 낳는
+        # 버그가 있었음. 이제 모든 차원을 ALL로 요청하고 err:31(셀 초과) 발생 시에만 기간 축소.
+        async def _progressive_fetch(build_fn) -> tuple:
+            """objL을 1→4 차원까지 확장하며 시도. (data, found_depth) 반환."""
+            objl: dict[str, str] = {}
+            ep = f"{BASE_URL}/Param/statisticsParameterData.do"
+            for depth in range(1, 5):
+                objl[f"objL{depth}"] = "ALL"
+                params = build_fn(itmId="ALL", **objl)
+                try:
+                    _r = await self._client.get(ep, params=params)
+                    _r.raise_for_status()
+                    result = _r.json()
+                except Exception:
+                    break
+                if isinstance(result, list) and result:
+                    return result, depth      # ✓ 성공
+                if isinstance(result, dict) and result.get("err") == "20":
+                    continue                  # objL 부족 → 다음 차원 추가
+                return result, depth          # err:30·31·empty list 등 → 루프 종료
+            return {}, 4
 
-        # ── err 20 또는 빈 결과: 표 구조 + 수록주기 자동 탐지 후 재시도 ────
-        needs_retry = (
-            (isinstance(data, dict) and data.get("err") == "20")
-            or (isinstance(data, list) and len(data) == 0)
-        )
-        if needs_retry:
+        # ── 1. progressive objL 조회 ──────────────────────────────────────────
+        data, _found_depth = await _progressive_fetch(_build_params)
+
+        # ── 2. 빈 결과 → prd_se 오탐 가능성 → probe로 수록주기만 감지 ─────────
+        if not (isinstance(data, list) and data):
             resolved = await self._probe_table_params(org_id, tbl_id, prd_se)
-            n_dims = resolved["n_dims"]
-            itm_ids = resolved["itm_ids"]
-            actual_prd = resolved["prd_se"]  # 탐지된 실제 수록주기
-
-            # prd_se가 달라졌으면 _build_params 재정의
+            actual_prd = resolved["prd_se"]
             if actual_prd != prd_se:
-                def _build_params(**extra) -> dict:  # noqa: F811
+                # prd_se 재정의 후 progressive 재시도
+                def _build_params_prd(**extra) -> dict:  # noqa: F811
                     p = {
                         "method": "getList",
                         "apiKey": self.api_key,
@@ -580,45 +592,52 @@ class KosisClient:
                         p["newEstPrdCnt"] = str(new_est_prd_cnt)
                     p.update(extra)
                     return p
+                data, _found_depth = await _progressive_fetch(_build_params_prd)
+                if isinstance(data, list) and data:
+                    _build_params = _build_params_prd  # 이후 err:31 재시도에 사용
 
-            total_codes = resolved.get("total_codes", {})
-            retry_extra = {}
-            for i in range(1, n_dims + 1):
-                # breakdown=True  : 모든 차원 ALL (성별·연령별 전체 세분화)
-                # expand_c1=True  : C1만 ALL, 나머지는 "계" (filter_keyword용 — 원인명 행 노출)
-                # 기본(False/False): 모든 차원 "계" 집계 코드 (셀 수 최소화)
-                if breakdown:
-                    retry_extra[f"objL{i}"] = "ALL"
-                elif expand_c1 and i == 1:
-                    retry_extra[f"objL{i}"] = "ALL"
-                else:
-                    retry_extra[f"objL{i}"] = total_codes.get(str(i), "ALL")
-            retry_extra["itmId"] = "+".join(itm_ids[:30]) if itm_ids else "ALL"
-            retry = _build_params(**retry_extra)
+        # ── 3. breakdown=False → 조회된 데이터에서 합계코드 추출 후 재조회 ────
+        #    (셀 수 절감 선택적 최적화. 실패하면 ALL로 가져온 원본 데이터 그대로 사용)
+        if isinstance(data, list) and data and not breakdown and not expand_c1:
+            _total_kws = {"계", "합계", "전국", "전체", "소계"}
+            _tcodes: dict[str, str] = {}
+            _iids: list[str] = []
+            _seen_iids: set[str] = set()
+            for _row in data:
+                _itm = _row.get("ITM_ID", "")
+                if _itm and _itm not in _seen_iids:
+                    _seen_iids.add(_itm)
+                    _iids.append(_itm)
+                for _ci in range(1, _found_depth + 1):
+                    if str(_ci) not in _tcodes:
+                        _nm = _row.get(f"C{_ci}_NM", "")
+                        _val = _row.get(f"C{_ci}", "")
+                        if _val and _nm in _total_kws:
+                            _tcodes[str(_ci)] = _val
+            if _tcodes:
+                _opt_extra = {f"objL{i}": _tcodes.get(str(i), "ALL") for i in range(1, _found_depth + 1)}
+                _opt_extra["itmId"] = "+".join(_iids[:30]) if _iids else "ALL"
+                try:
+                    _opt_r = await self._client.get(
+                        f"{BASE_URL}/Param/statisticsParameterData.do",
+                        params=_build_params(**_opt_extra),
+                    )
+                    _opt_r.raise_for_status()
+                    _opt_data = _opt_r.json()
+                    if isinstance(_opt_data, list) and _opt_data:
+                        data = _opt_data  # 최적화 성공 → 좁은 결과 사용
+                    # else: 최적화 실패 → ALL로 가져온 원본 data 유지 (안전)
+                except Exception:
+                    pass
 
-            # 2차: Param 엔드포인트
-            resp2 = await self._client.get(
-                f"{BASE_URL}/Param/statisticsParameterData.do", params=retry
-            )
-            resp2.raise_for_status()
-            data = resp2.json()
-
-            # 3차: 표준 statisticsData.do 폴백
-            if isinstance(data, dict) and data.get("err") == "20":
-                resp3 = await self._client.get(
-                    f"{BASE_URL}/statisticsData.do", params=retry
-                )
-                resp3.raise_for_status()
-                data = resp3.json()
-
-        # ── err 31: 40,000셀 초과 → 기간 자동 축소 후 재시도 (최대 3회) ────
+        # ── 4. err 31: 40,000셀 초과 → 기간 자동 축소 후 재시도 (최대 3회) ────
+        _objl_all = {f"objL{i}": "ALL" for i in range(1, _found_depth + 1)}
         retries = 3
         while isinstance(data, dict) and data.get("err") == "31" and retries > 0:
             retries -= 1
             if new_est_prd_cnt and new_est_prd_cnt > 1:
                 new_est_prd_cnt = max(1, new_est_prd_cnt // 2)
             elif start_prd_de and end_prd_de:
-                # 기간 범위를 절반으로 축소
                 try:
                     s = int(start_prd_de[:4])
                     e = int(end_prd_de[:4])
@@ -627,10 +646,8 @@ class KosisClient:
                 except Exception:
                     break
             else:
-                break  # 더 줄일 방법 없음
-
-            # 줄인 기간으로 재시도 파라미터 재구성
-            reduced = _build_params(**retry_extra) if 'retry_extra' in dir() else _build_params(objL1=obj_l1, itmId=itm_id)
+                break
+            reduced = _build_params(**_objl_all, itmId="ALL")
             if new_est_prd_cnt:
                 reduced["newEstPrdCnt"] = str(new_est_prd_cnt)
                 reduced.pop("startPrdDe", None)

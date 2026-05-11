@@ -356,40 +356,16 @@ async def kosis_analyze(
     else:
         merged_raw = primary_data
 
-    # ── auto-fallback: 데이터가 없고 기간이 지정됐을 때 동일 기관 관련 표 자동 탐색 ──
-    if not merged_raw and (start_year or end_year) and not extra_ids:
-        kw_tokens = [t for t in title.split() if len(t) >= 2][:2]
-        search_kw = kw_tokens[0] if kw_tokens else title[:8]
-        try:
-            search_results = await client.search_statistics(keyword=search_kw)
-            candidates = [
-                r["TBL_ID"] for r in search_results
-                if r.get("ORG_ID") == org_id
-                and r.get("TBL_ID")
-                and r.get("TBL_ID") != tbl_id
-            ][:4]
-        except Exception:
-            candidates = []
-
-        if candidates:
-            cand_results = await asyncio.gather(*[_fetch(org_id, cid) for cid in candidates])
-            auto_rows: list[dict] = []
-            auto_used: list[str] = []
-            seen_auto: set[str] = set()
-            for cid, cdata in zip(candidates, cand_results):
-                for row in (cdata or []):
-                    key = f"{row.get('PRD_DE','')}__{row.get('ITM_NM','')}__{row.get('C1_NM','')}"
-                    if key not in seen_auto:
-                        auto_rows.append(row)
-                        seen_auto.add(key)
-                if cdata:
-                    auto_used.append(cid)
-            if auto_rows:
-                merged_raw = sorted(auto_rows, key=lambda r: r.get("PRD_DE", ""))
-                extra_ids = auto_used  # merged_tables 기록용
-
     if not merged_raw:
-        return "데이터가 없습니다."
+        # 데이터가 없을 때 명시적 안내 반환 (무관한 표 자동병합 금지)
+        hint = ""
+        if start_year or end_year:
+            hint = (
+                f" 요청 기간({start_year or ''}~{end_year or ''})에 이 표의 데이터가 없을 수 있습니다. "
+                "작성방식 변경으로 기간별 표가 분리된 경우 kosis_browse로 관련 표를 탐색한 뒤 "
+                "extra_tbl_ids 파라미터에 이전 표 ID를 전달하세요."
+            )
+        return json.dumps({"error": "데이터가 없습니다." + hint, "tbl_id": tbl_id}, ensure_ascii=False)
 
     # filter_keyword를 _process_data 이전에 원본 데이터에 적용
     # (이후 적용하면 _process_data가 unique>12 행을 "계"만 남겨 filter_keyword가 빈 결과 반환하는 버그 수정)
