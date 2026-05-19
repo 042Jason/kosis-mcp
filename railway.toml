@@ -1,3 +1,12 @@
+# Railway 배포 설정
+# mcp-deploy-guide 적용:
+#   - startCommand: sh -c 래핑 + --forwarded-allow-ips="*" + --proxy-headers
+#   - host="0.0.0.0" 은 FastMCP/uvicorn 양쪽에 적용 (server.py 참고)
+# 메모리 메모:
+#   - Hobby 플랜 0.5GB 한도. pandas import만 ~150MB 차지.
+#   - 대용량 KOSIS 응답은 _KEEP_FIELDS 로 필드 슬림화 (server.py 참고).
+#   - OOM 발생 시 RAILWAY_DEPLOYMENT_RESOURCE_LIMIT 또는 플랜 업그레이드 검토.
+
 [build]
 builder = "dockerfile"
 
@@ -6,3 +15,4 @@ startCommand = "sh -c 'uvicorn server:starlette_app --host 0.0.0.0 --port $PORT 
 healthcheckPath = "/health"
 healthcheckTimeout = 30
 restartPolicyType = "on_failure"
+restartPolicyMaxRetries = 3
