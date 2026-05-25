@@ -359,15 +359,15 @@ def detect_intent(query: str) -> list[dict]:
 
 
 # Module-level shared httpx client — one connection pool for all API keys
-# keepalive_expiry=20: KOSIS 서버가 idle 연결을 먼저 닫기 전에 클라이언트가 먼저 정리
-# max_connections=20: Railway 단일 컨테이너에서 과도한 연결 방지
-# max_keepalive_connections=10: keep-alive pool 상한 (stale connection hang 방지)
+# keepalive_expiry=10: KOSIS 서버가 idle 연결을 먼저 닫기 전에 클라이언트가 먼저 정리
+# max_connections=8: Railway Hobby 플랜(0.5GB) 메모리 절감 — 연결당 ~수십KB 소비
+# max_keepalive_connections=5: keep-alive pool 상한 (stale connection hang 방지)
 _shared_http_client = httpx.AsyncClient(
-    timeout=30.0,
+    timeout=15.0,
     limits=httpx.Limits(
-        max_connections=20,
-        max_keepalive_connections=10,
-        keepalive_expiry=20.0,
+        max_connections=8,
+        max_keepalive_connections=5,
+        keepalive_expiry=10.0,
     ),
 )
 

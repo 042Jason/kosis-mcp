@@ -8,7 +8,6 @@ import contextvars
 import json
 import os
 
-import pandas as pd
 import uvicorn
 from mcp.server.fastmcp import FastMCP
 from starlette.middleware.cors import CORSMiddleware
@@ -181,49 +180,77 @@ def _apply_region_filter(rows: list, filter_keyword: str) -> tuple[list, dict]:
     return filtered, extra
 
 
+_AGGREGATE_RE = re.compile(r'전국|합계|전체|계$')
+
+
+
+def _parse_dt(val) -> float | None:
+    """DT 값을 float으로 변환. 실패 시 None 반환."""
+    if val is None:
+        return None
+    try:
+        return float(str(val).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
 def _process_data(data: list, color_field=None):
     if not data:
         return [], {}, ""
     unit = data[0].get("UNIT_NM", "") or ""
-    rows = [{k: v for k, v in row.items() if k in _KEEP_FIELDS} for row in data]
-    df = pd.DataFrame(rows)
-    if "DT" in df.columns:
-        df["DT"] = pd.to_numeric(
-            df["DT"].astype(str).str.replace(",", "", regex=False).str.strip(),
-            errors="coerce",
+
+    # 필요한 필드만 추출하면서 DT를 숫자로 변환 (pandas 없이 순수 Python)
+    rows: list[dict] = []
+    for row in data:
+        r = {k: row[k] for k in _KEEP_FIELDS if k in row}
+        if "DT" in r:
+            r["DT"] = _parse_dt(r["DT"])
+        rows.append(r)
+
+    # color_field 고유값이 12개 초과 시 집계 행만 남기거나 상위 10개로 축소
+    if color_field and rows and color_field in rows[0]:
+        unique_vals: set = {r.get(color_field) for r in rows if r.get(color_field) is not None}
+        if len(unique_vals) > 12:
+            # 집계 키워드 포함 행 우선
+            agg_rows = [r for r in rows if _AGGREGATE_RE.search(str(r.get(color_field, "")))]
+            if agg_rows:
+                rows = agg_rows
+            else:
+                # DT 평균 기준 상위 10개 color_field 값 선택
+                sums: dict[str, list[float]] = {}
+                for r in rows:
+                    cv = r.get(color_field)
+                    dt = r.get("DT")
+                    if cv is not None and dt is not None:
+                        sums.setdefault(str(cv), []).append(dt)
+                top10 = sorted(sums, key=lambda k: sum(sums[k]) / len(sums[k]), reverse=True)[:10]
+                top_set = set(top10)
+                rows = [r for r in rows if str(r.get(color_field, "")) in top_set]
+
+    # 요약 통계 계산
+    summary: dict = {}
+    dt_vals = [r["DT"] for r in rows if r.get("DT") is not None]
+    if dt_vals:
+        trend = (
+            "상승" if len(dt_vals) >= 2 and dt_vals[-1] > dt_vals[0]
+            else ("하락" if len(dt_vals) >= 2 else "N/A")
         )
-    if color_field and color_field in df.columns and df[color_field].nunique() > 12:
-        mask = df[color_field].astype(str).str.contains(
-            "전국|합계|전체|계$", na=False, regex=True
-        )
-        if mask.any():
-            df = df[mask].copy()
-        elif "DT" in df.columns:
-            top = df.groupby(color_field)["DT"].mean().dropna().nlargest(10).index
-            df = df[df[color_field].isin(top)].copy()
-    summary = {}
-    if "DT" in df.columns:
-        s = df["DT"].dropna()
-        if not s.empty:
-            trend = (
-                "상승" if len(s) >= 2 and float(s.iloc[-1]) > float(s.iloc[0])
-                else ("하락" if len(s) >= 2 else "N/A")
-            )
-            change_pct = None
-            if len(s) >= 2 and float(s.iloc[0]) != 0:
-                change_pct = round(
-                    (float(s.iloc[-1]) - float(s.iloc[0])) / abs(float(s.iloc[0])) * 100, 1
-                )
-            summary = {
-                "count": int(s.count()),
-                "min": round(float(s.min()), 3),
-                "max": round(float(s.max()), 3),
-                "mean": round(float(s.mean()), 3),
-                "latest": round(float(s.iloc[-1]), 3),
-                "trend": trend,
-                "change_pct": change_pct,
-            }
-    return df.to_dict(orient="records"), summary, unit
+        change_pct = None
+        if len(dt_vals) >= 2 and dt_vals[0] != 0:
+            change_pct = round((dt_vals[-1] - dt_vals[0]) / abs(dt_vals[0]) * 100, 1)
+        total = sum(dt_vals)
+        n = len(dt_vals)
+        summary = {
+            "count": n,
+            "min": round(min(dt_vals), 3),
+            "max": round(max(dt_vals), 3),
+            "mean": round(total / n, 3),
+            "latest": round(dt_vals[-1], 3),
+            "trend": trend,
+            "change_pct": change_pct,
+        }
+
+    return rows, summary, unit
 
 
 # ---------------------------------------------------------------------------
